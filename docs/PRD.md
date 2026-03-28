@@ -540,7 +540,7 @@ go-fintech/
 ├── docker-compose.test.yml           # Integration test stack
 ├── Makefile                          # Common commands
 ├── go.work                           # Go workspace file (Go 1.18+)
-├── .env.example                      # Environment template
+├── .env.example                      # (Optional) Docker Compose env template
 └── README.md
 ```
 

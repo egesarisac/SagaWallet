@@ -1,0 +1,9 @@
+# Notification Service Configuration
+SERVICE_NAME: notification-service
+HTTP_PORT: 8084
+
+KAFKA_BROKERS: localhost:9092
+KAFKA_GROUP_ID: notification-service
+
+LOG_LEVEL: debug
+LOG_FORMAT: console

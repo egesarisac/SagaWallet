@@ -1,0 +1,195 @@
+version: '3.8'
+
+services:
+  wallet-db:
+    image: postgres:16-alpine
+    container_name: wallet-db-full
+    environment:
+      POSTGRES_USER: wallet_user
+      POSTGRES_PASSWORD: ${WALLET_DB_PASSWORD:-wallet_secret}
+      POSTGRES_DB: wallet_db
+    ports:
+      - "5434:5432"
+    volumes:
+      - wallet_data_full:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wallet_user -d wallet_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - go-fintech-full
+
+  transaction-db:
+    image: postgres:16-alpine
+    container_name: transaction-db-full
+    environment:
+      POSTGRES_USER: transaction_user
+      POSTGRES_PASSWORD: ${TRANSACTION_DB_PASSWORD:-transaction_secret}
+      POSTGRES_DB: transaction_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - transaction_data_full:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U transaction_user -d transaction_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - go-fintech-full
+
+  redpanda:
+    image: redpandadata/redpanda:v23.3.5
+    container_name: redpanda-full
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=1G
+      - --overprovisioned
+      - --node-id=0
+      - --kafka-addr=PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda-full:29092,OUTSIDE://localhost:9092
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    volumes:
+      - redpanda_data_full:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - go-fintech-full
+
+  init-topics:
+    image: redpandadata/redpanda:v23.3.5
+    container_name: init-topics-full
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command: |
+      "
+      echo 'Waiting for Redpanda internal networking...'
+      sleep 10
+      echo 'Creating Kafka topics...'
+      for i in 1 2 3 4 5; do
+        out=$(rpk topic create transfer.created transfer.debit.requested transfer.debit.success transfer.debit.failed transfer.credit.requested transfer.credit.success transfer.credit.failed transfer.refund.requested transfer.refund.success transfer.completed transfer.failed transfer.dlq --partitions 3 --replicas 1 -X brokers=redpanda-full:29092 2>&1) && break || true
+        echo "$out"
+        echo "$out" | grep -q "TOPIC_ALREADY_EXISTS" && echo "Topics already exist; continuing." && break
+        echo \"Attempt $$i failed, retrying in 5s...\"
+        sleep 5
+      done
+      "
+    networks:
+      - go-fintech-full
+
+  wallet-service:
+    build:
+      context: .
+      dockerfile: build/docker/wallet-service.Dockerfile
+    container_name: wallet-service
+    ports:
+      - "8081:8080"
+      - "9081:9081"
+    environment:
+      PORT: 8080
+      DB_HOST: wallet-db-full
+      DB_PORT: 5432
+      DB_USER: wallet_user
+      DB_PASSWORD: ${WALLET_DB_PASSWORD:-wallet_secret}
+      DB_NAME: wallet_db
+      DB_SSLMODE: disable
+      KAFKA_BROKERS: redpanda-full:29092
+      JWT_SECRET: ${JWT_SECRET:-dev-local-jwt-secret-change-me}
+      DISABLE_RATE_LIMIT: "true"
+    depends_on:
+      wallet-db:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    networks:
+      - go-fintech-full
+
+  transaction-service:
+    build:
+      context: .
+      dockerfile: build/docker/transaction-service.Dockerfile
+    container_name: transaction-service
+    ports:
+      - "8083:8080"
+    environment:
+      PORT: 8080
+      DB_HOST: transaction-db-full
+      DB_PORT: 5432
+      DB_USER: transaction_user
+      DB_PASSWORD: ${TRANSACTION_DB_PASSWORD:-transaction_secret}
+      DB_NAME: transaction_db
+      DB_SSLMODE: disable
+      KAFKA_BROKERS: redpanda-full:29092
+      WALLET_GRPC_ADDR: wallet-service:9081
+      JWT_SECRET: ${JWT_SECRET:-dev-local-jwt-secret-change-me}
+      DISABLE_RATE_LIMIT: "true"
+    depends_on:
+      transaction-db:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+      wallet-service:
+        condition: service_started
+    networks:
+      - go-fintech-full
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: build/docker/notification-service.Dockerfile
+    container_name: notification-service
+    ports:
+      - "8084:8084"
+    environment:
+      KAFKA_BROKERS: redpanda-full:29092
+      DISABLE_RATE_LIMIT: "true"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks:
+      - go-fintech-full
+
+  # Redpanda Console (Kafka UI)
+  redpanda-console:
+    image: redpandadata/console:v2.4.3
+    container_name: redpanda-console
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: redpanda-full:29092
+    ports:
+      - "8080:8080"
+    networks:
+      - go-fintech-full
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    volumes:
+      - ./deployments/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    networks:
+      - go-fintech-full
+
+volumes:
+  wallet_data_full:
+  transaction_data_full:
+  redpanda_data_full:
+
+networks:
+  go-fintech-full:
+    driver: bridge

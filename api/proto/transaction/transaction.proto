@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package transaction.v1;
+
+option go_package = "github.com/egesarisac/SagaWallet/api/gen/transaction";
+
+import "google/protobuf/timestamp.proto";
+
+// TransactionService provides gRPC operations for transfers.
+service TransactionService {
+  // CreateTransfer initiates a new money transfer.
+  rpc CreateTransfer(CreateTransferRequest) returns (CreateTransferResponse);
+  
+  // GetTransfer returns transfer details.
+  rpc GetTransfer(GetTransferRequest) returns (GetTransferResponse);
+  
+  // GetTransfersByWallet returns all transfers for a wallet.
+  rpc GetTransfersByWallet(GetTransfersByWalletRequest) returns (GetTransfersByWalletResponse);
+}
+
+// Transfer represents a money transfer between wallets.
+message Transfer {
+  string id = 1;
+  string sender_wallet_id = 2;
+  string receiver_wallet_id = 3;
+  string amount = 4;       // Use string for decimal precision
+  string currency = 5;
+  string status = 6;       // PENDING, DEBITED, COMPLETED, REFUNDING, FAILED, MANUAL_REVIEW
+  string failure_reason = 7;
+  string idempotency_key = 8;
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
+}
+
+// CreateTransferRequest is the request to create a new transfer.
+message CreateTransferRequest {
+  string sender_wallet_id = 1;
+  string receiver_wallet_id = 2;
+  string amount = 3;
+  string currency = 4;
+  string idempotency_key = 5;  // Client-provided key for deduplication
+}
+
+// CreateTransferResponse is the response after creating a transfer.
+message CreateTransferResponse {
+  Transfer transfer = 1;
+}
+
+// GetTransferRequest is the request to get transfer details.
+message GetTransferRequest {
+  string transfer_id = 1;
+}
+
+// GetTransferResponse is the response containing transfer details.
+message GetTransferResponse {
+  Transfer transfer = 1;
+}
+
+// GetTransfersByWalletRequest is the request to get transfers for a wallet.
+message GetTransfersByWalletRequest {
+  string wallet_id = 1;
+  int32 limit = 2;
+  int32 offset = 3;
+  string status_filter = 4;  // Optional: filter by status
+}
+
+// GetTransfersByWalletResponse is the response containing a list of transfers.
+message GetTransfersByWalletResponse {
+  repeated Transfer transfers = 1;
+  int32 total_count = 2;
+}

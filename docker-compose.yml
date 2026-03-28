@@ -1,0 +1,130 @@
+# SagaWallet - Local Development Stack
+
+services:
+  # ===================
+  # PostgreSQL Databases
+  # ===================
+  
+  wallet-db:
+    image: postgres:16-alpine
+    container_name: wallet-db
+    environment:
+      POSTGRES_USER: wallet_user
+      POSTGRES_PASSWORD: ${WALLET_DB_PASSWORD:-wallet_secret}
+      POSTGRES_DB: wallet_db
+    ports:
+      - "5434:5432"
+    volumes:
+      - wallet_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wallet_user -d wallet_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - go-fintech
+
+  transaction-db:
+    image: postgres:16-alpine
+    container_name: transaction-db
+    environment:
+      POSTGRES_USER: transaction_user
+      POSTGRES_PASSWORD: ${TRANSACTION_DB_PASSWORD:-transaction_secret}
+      POSTGRES_DB: transaction_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - transaction_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U transaction_user -d transaction_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - go-fintech
+
+  # ===================
+  # Kafka (using Redpanda for simplicity - no Zookeeper needed)
+  # ===================
+  
+  redpanda:
+    image: redpandadata/redpanda:v23.3.5
+    container_name: redpanda
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=1G
+      - --overprovisioned
+      - --node-id=0
+      - --kafka-addr=PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+      - --pandaproxy-addr=0.0.0.0:8082
+      - --advertise-pandaproxy-addr=localhost:8082
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+      - "8082:8082"
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - go-fintech
+
+  # Redpanda Console (Kafka UI)
+  redpanda-console:
+    image: redpandadata/console:v2.4.3
+    container_name: redpanda-console
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: redpanda:29092
+    ports:
+      - "8080:8080"
+    networks:
+      - go-fintech
+
+  # ===================
+  # Topic Initialization
+  # ===================
+  
+  init-topics:
+    image: redpandadata/redpanda:v23.3.5
+    container_name: init-topics
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command: |
+      "
+      echo 'Waiting for Redpanda internal networking...'
+      sleep 10
+      
+      echo 'Creating Kafka topics...'
+      for i in 1 2 3 4 5; do
+        out=$(rpk topic create transfer.created transfer.debit.requested transfer.debit.success transfer.debit.failed transfer.credit.requested transfer.credit.success transfer.credit.failed transfer.refund.requested transfer.refund.success transfer.completed transfer.failed transfer.dlq --partitions 3 --replicas 1 -X brokers=redpanda:29092 2>&1) && break || true
+        echo "$out"
+        echo "$out" | grep -q "TOPIC_ALREADY_EXISTS" && echo "Topics already exist; continuing." && break
+        echo \"Attempt $$i failed, retrying in 5s...\"
+        sleep 5
+      done
+      
+      echo 'Topics created:'
+      rpk topic list -X brokers=redpanda:29092
+      "
+    networks:
+      - go-fintech
+
+volumes:
+  wallet_data:
+  transaction_data:
+  redpanda_data:
+
+networks:
+  go-fintech:
+    driver: bridge

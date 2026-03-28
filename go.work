@@ -1,0 +1,13 @@
+go 1.25.0
+
+use (
+	./api
+	./pkg
+	./pkg/errors
+	./pkg/middleware
+	./services/notification-service
+	./services/transaction-service
+	./services/wallet-service
+	./tests/integration
+	./tools/tokengen
+)

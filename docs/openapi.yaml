@@ -1,0 +1,555 @@
+openapi: 3.0.3
+info:
+  title: SagaWallet API
+  description: |
+    A distributed wallet system with Saga Choreography for distributed transactions.
+    
+    ## Microservices
+    - **Wallet Service** (localhost:8081): Wallet management, balance operations
+    - **Transaction Service** (localhost:8083): Transfer orchestration
+    
+    ## Authentication
+    All `/api/v1/*` endpoints require JWT authentication.
+    Include the token in the `Authorization` header as `Bearer <token>`.
+    
+    ## Rate Limiting
+    Rate limiting can be enabled/disabled via DISABLE_RATE_LIMIT env var.
+  version: 1.0.0
+  contact:
+    name: API Support
+    email: esarisac@gmail.com
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:8081
+    description: Wallet Service (Local Development)
+  - url: https://wallet-service-v67id5oira-uc.a.run.app
+    description: Wallet Service (Production/GCP)
+
+tags:
+  - name: Wallets
+    description: Wallet management operations (Wallet Service :8081)
+  - name: Transfers
+    description: Transfer operations (Transaction Service :8083)
+  - name: Health
+    description: Health check endpoints (available on all services)
+
+paths:
+  # ===================
+  # Wallet Service Endpoints
+  # ===================
+  
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      description: Returns service health status (available on all services)
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /metrics:
+    get:
+      tags: [Health]
+      summary: Prometheus metrics
+      description: Returns Prometheus-formatted metrics (available on all services)
+      responses:
+        '200':
+          description: Prometheus metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/v1/wallets:
+    post:
+      tags: [Wallets]
+      summary: Create a new wallet
+      description: Creates a new wallet for a user
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWalletRequest'
+      responses:
+        '201':
+          description: Wallet created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Wallet already exists for this user and currency
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/wallets/{id}:
+    get:
+      tags: [Wallets]
+      summary: Get wallet by ID
+      description: Returns wallet details
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WalletID'
+      responses:
+        '200':
+          description: Wallet details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Wallets]
+      summary: Delete wallet
+      description: Permanently deletes a wallet and its transactions
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WalletID'
+      responses:
+        '204':
+          description: Wallet deleted successfully
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/wallets/{id}/balance:
+    get:
+      tags: [Wallets]
+      summary: Get wallet balance
+      description: Returns current wallet balance
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WalletID'
+      responses:
+        '200':
+          description: Balance information
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      wallet_id:
+                        type: string
+                        format: uuid
+                      balance:
+                        type: string
+                        example: "1000.00"
+                      currency:
+                        type: string
+                        example: TRY
+
+  /api/v1/wallets/{id}/credit:
+    post:
+      tags: [Wallets]
+      summary: Credit wallet
+      description: Add funds to a wallet
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WalletID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransactionRequest'
+      responses:
+        '200':
+          description: Credit successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/wallets/{id}/debit:
+    post:
+      tags: [Wallets]
+      summary: Debit wallet
+      description: Withdraw funds from a wallet
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WalletID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransactionRequest'
+      responses:
+        '200':
+          description: Debit successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletResponse'
+        '400':
+          description: Invalid amount or insufficient funds
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/wallets/{id}/transactions:
+    get:
+      tags: [Wallets]
+      summary: Get transaction history
+      description: Returns wallet transaction history with pagination
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WalletID'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Transaction history
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Transaction'
+
+  /api/v1/wallets/{id}/status:
+    put:
+      tags: [Wallets]
+      summary: Update wallet status
+      description: Freeze, suspend, or activate a wallet
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WalletID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [ACTIVE, SUSPENDED, FROZEN, CLOSED]
+      responses:
+        '200':
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletResponse'
+
+  # ===================
+  # Transaction Service Endpoints
+  # ===================
+  
+  /api/v1/transfers:
+    post:
+      tags: [Transfers]
+      summary: Create a transfer
+      description: |
+        Initiates a transfer between two wallets using the Saga pattern.
+        The transfer is processed asynchronously.
+        
+        **Server**: Transaction Service
+      servers:
+        - url: http://localhost:8083
+          description: Transaction Service (Local Development)
+        - url: https://transaction-service-v67id5oira-uc.a.run.app
+          description: Transaction Service (Production/GCP)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTransferRequest'
+      responses:
+        '202':
+          description: Transfer initiated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      transfer_id:
+                        type: string
+                        format: uuid
+                      status:
+                        type: string
+                        enum: [PENDING]
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Duplicate transfer (same idempotency key)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/transfers/{id}:
+    get:
+      tags: [Transfers]
+      summary: Get transfer status
+      description: |
+        Returns the current status of a transfer.
+        
+        **Server**: Transaction Service (localhost:8083)
+      servers:
+        - url: http://localhost:8083
+          description: Transaction Service
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Transfer ID
+      responses:
+        '200':
+          description: Transfer details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransferResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    WalletID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Wallet ID
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Missing or invalid authentication
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    CreateWalletRequest:
+      type: object
+      required: [user_id, currency]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        currency:
+          type: string
+          enum: [TRY, USD, EUR]
+          example: TRY
+
+    WalletResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            user_id:
+              type: string
+              format: uuid
+            balance:
+              type: string
+              example: "1000.00"
+            currency:
+              type: string
+              example: TRY
+            status:
+              type: string
+              enum: [ACTIVE, SUSPENDED, FROZEN, CLOSED]
+            version:
+              type: integer
+              description: Optimistic locking version
+
+    TransactionRequest:
+      type: object
+      required: [amount, reference_id]
+      properties:
+        amount:
+          type: string
+          example: "100.00"
+          description: Amount (positive decimal string)
+        reference_id:
+          type: string
+          format: uuid
+          description: Unique reference for idempotency
+        description:
+          type: string
+          example: "Deposit"
+
+    Transaction:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        wallet_id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [CREDIT, DEBIT]
+        amount:
+          type: string
+        description:
+          type: string
+        reference_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+
+    CreateTransferRequest:
+      type: object
+      required: [sender_wallet_id, receiver_wallet_id, amount]
+      properties:
+        sender_wallet_id:
+          type: string
+          format: uuid
+        receiver_wallet_id:
+          type: string
+          format: uuid
+        amount:
+          type: string
+          example: "50.00"
+        idempotency_key:
+          type: string
+          description: Optional key to prevent duplicate transfers
+
+    TransferResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            sender_wallet_id:
+              type: string
+              format: uuid
+            receiver_wallet_id:
+              type: string
+              format: uuid
+            amount:
+              type: string
+            currency:
+              type: string
+            status:
+              type: string
+              enum: [PENDING, DEBITED, COMPLETED, REFUNDING, FAILED]
+            failure_reason:
+              type: string
+              nullable: true
+            created_at:
+              type: string
+              format: date-time
+            updated_at:
+              type: string
+              format: date-time
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: WALLET_NOT_FOUND
+            message:
+              type: string
+              example: Wallet not found with given ID

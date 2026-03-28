@@ -1,0 +1,22 @@
+SERVICE_NAME: "wallet-service"
+HTTP_PORT: 8080
+GRPC_PORT: 9081
+
+# Database
+DB_HOST: "localhost"
+DB_PORT: 5434
+DB_USER: "wallet_user"
+DB_PASSWORD: "wallet_secret"
+DB_NAME: "wallet_db"
+DB_SSLMODE: "disable"
+
+# Kafka
+KAFKA_BROKERS: "localhost:9092"
+KAFKA_GROUP_ID: "wallet-service"
+
+# Logging
+LOG_LEVEL: "debug"
+LOG_FORMAT: "console"
+
+# JWT Authentication
+JWT_SECRET: "dev-local-jwt-secret-change-me"

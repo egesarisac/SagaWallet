@@ -1,0 +1,195 @@
+openapi: 3.0.3
+info:
+  title: Transaction Service API
+  description: |
+    Transfer orchestration service for the SagaWallet platform.
+    Uses Saga Choreography pattern for distributed transactions.
+    
+    ## Authentication
+    All `/api/v1/*` endpoints require JWT authentication.
+    Include the token in the `Authorization` header as `Bearer <token>`.
+  version: 1.0.0
+  contact:
+    name: API Support
+    email: esarisac@gmail.com
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:8083
+    description: Transaction Service (Local Development)
+  - url: https://transaction-service-v67id5oira-uc.a.run.app
+    description: Transaction Service (Production/GCP)
+
+tags:
+  - name: Transfers
+    description: Transfer operations
+  - name: Health
+    description: Health check endpoints
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /metrics:
+    get:
+      tags: [Health]
+      summary: Prometheus metrics
+      responses:
+        '200':
+          description: Prometheus metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/v1/transfers:
+    post:
+      tags: [Transfers]
+      summary: Create a transfer
+      description: |
+        Initiates a transfer between two wallets using the Saga pattern.
+        The transfer is processed asynchronously via Kafka events.
+        
+        **Flow:**
+        1. Transfer created (PENDING)
+        2. Sender wallet debited (DEBITED)
+        3. Receiver wallet credited (COMPLETED)
+        
+        If any step fails, compensation is triggered automatically.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTransferRequest'
+      responses:
+        '202':
+          description: Transfer initiated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      transfer_id:
+                        type: string
+                        format: uuid
+                      status:
+                        type: string
+                        enum: [PENDING]
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Duplicate transfer (same idempotency key)
+
+  /api/v1/transfers/{id}:
+    get:
+      tags: [Transfers]
+      summary: Get transfer status
+      description: Returns the current status of a transfer
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Transfer ID
+      responses:
+        '200':
+          description: Transfer details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransferResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    BadRequest:
+      description: Invalid request
+    Unauthorized:
+      description: Missing or invalid authentication
+    NotFound:
+      description: Resource not found
+
+  schemas:
+    CreateTransferRequest:
+      type: object
+      required: [sender_wallet_id, receiver_wallet_id, amount]
+      properties:
+        sender_wallet_id:
+          type: string
+          format: uuid
+        receiver_wallet_id:
+          type: string
+          format: uuid
+        amount:
+          type: string
+          example: "50.00"
+        idempotency_key:
+          type: string
+          description: Optional key to prevent duplicate transfers
+
+    TransferResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            sender_wallet_id:
+              type: string
+              format: uuid
+            receiver_wallet_id:
+              type: string
+              format: uuid
+            amount:
+              type: string
+            currency:
+              type: string
+            status:
+              type: string
+              enum: [PENDING, DEBITED, COMPLETED, REFUNDING, FAILED]
+            failure_reason:
+              type: string
+              nullable: true
+            created_at:
+              type: string
+              format: date-time
+            updated_at:
+              type: string
+              format: date-time

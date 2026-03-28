@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package wallet.v1;
+
+option go_package = "github.com/egesarisac/SagaWallet/api/gen/wallet";
+
+import "google/protobuf/timestamp.proto";
+
+// WalletService provides gRPC operations for wallet management.
+service WalletService {
+  // GetBalance returns the current balance of a wallet.
+  rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
+  
+  // Credit adds funds to a wallet.
+  rpc Credit(CreditRequest) returns (CreditResponse);
+  
+  // Debit removes funds from a wallet.
+  rpc Debit(DebitRequest) returns (DebitResponse);
+  
+  // GetWallet returns wallet details.
+  rpc GetWallet(GetWalletRequest) returns (GetWalletResponse);
+}
+
+// Wallet represents a user's wallet.
+message Wallet {
+  string id = 1;
+  string user_id = 2;
+  string balance = 3;  // Use string for decimal precision
+  string currency = 4;
+  string status = 5;   // ACTIVE, SUSPENDED, FROZEN, CLOSED
+  int64 version = 6;
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp updated_at = 8;
+}
+
+// GetBalanceRequest is the request to get wallet balance.
+message GetBalanceRequest {
+  string wallet_id = 1;
+}
+
+// GetBalanceResponse is the response containing wallet balance.
+message GetBalanceResponse {
+  string wallet_id = 1;
+  string balance = 2;
+  string currency = 3;
+}
+
+// CreditRequest is the request to add funds to a wallet.
+message CreditRequest {
+  string wallet_id = 1;
+  string amount = 2;      // Use string for decimal precision
+  string reference_id = 3; // Reference to transaction/transfer
+  string description = 4;
+}
+
+// CreditResponse is the response after crediting a wallet.
+message CreditResponse {
+  string wallet_id = 1;
+  string new_balance = 2;
+  string transaction_id = 3;
+}
+
+// DebitRequest is the request to remove funds from a wallet.
+message DebitRequest {
+  string wallet_id = 1;
+  string amount = 2;      // Use string for decimal precision
+  string reference_id = 3; // Reference to transaction/transfer
+  string description = 4;
+}
+
+// DebitResponse is the response after debiting a wallet.
+message DebitResponse {
+  string wallet_id = 1;
+  string new_balance = 2;
+  string transaction_id = 3;
+}
+
+// GetWalletRequest is the request to get wallet details.
+message GetWalletRequest {
+  string wallet_id = 1;
+}
+
+// GetWalletResponse is the response containing wallet details.
+message GetWalletResponse {
+  Wallet wallet = 1;
+}

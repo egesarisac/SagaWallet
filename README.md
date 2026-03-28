@@ -278,6 +278,22 @@ sagawallet/
 
 ---
 
+## 🌿 Git Workflow (PR-First)
+
+This repository uses a PR-first trunk-based workflow.
+
+1. Create a short-lived branch from `main`.
+2. Push the branch and open a Pull Request into `main`.
+3. CI runs on the PR (lint + tests).
+4. Merge only after review approval and passing checks.
+5. Merge to `main` triggers image build and deployment jobs.
+
+Direct pushes to `main` should not be used for normal development.
+
+For full contribution and branch protection guidance, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+---
+
 ## 📨 Kafka Topics
 
 | Topic | Publisher | Purpose |

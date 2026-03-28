@@ -7,13 +7,12 @@
 package wallet
 
 import (
-	reflect "reflect"
-	sync "sync"
-	unsafe "unsafe"
-
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
+	reflect "reflect"
+	sync "sync"
+	unsafe "unsafe"
 )
 
 const (
@@ -631,7 +630,7 @@ const file_wallet_proto_rawDesc = "" +
 	"GetBalance\x12\x1c.wallet.v1.GetBalanceRequest\x1a\x1d.wallet.v1.GetBalanceResponse\x12=\n" +
 	"\x06Credit\x12\x18.wallet.v1.CreditRequest\x1a\x19.wallet.v1.CreditResponse\x12:\n" +
 	"\x05Debit\x12\x17.wallet.v1.DebitRequest\x1a\x18.wallet.v1.DebitResponse\x12F\n" +
-	"\tGetWallet\x12\x1b.wallet.v1.GetWalletRequest\x1a\x1c.wallet.v1.GetWalletResponseBAZ?github.com/egesarisac/SagaWallet/api/proto/walletb\x06proto3"
+	"\tGetWallet\x12\x1b.wallet.v1.GetWalletRequest\x1a\x1c.wallet.v1.GetWalletResponseB1Z/github.com/egesarisac/SagaWallet/api/gen/walletb\x06proto3"
 
 var (
 	file_wallet_proto_rawDescOnce sync.Once

@@ -7,13 +7,12 @@
 package transaction
 
 import (
-	reflect "reflect"
-	sync "sync"
-	unsafe "unsafe"
-
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
+	reflect "reflect"
+	sync "sync"
+	unsafe "unsafe"
 )
 
 const (
@@ -518,7 +517,7 @@ const file_transaction_proto_rawDesc = "" +
 	"\x12TransactionService\x12_\n" +
 	"\x0eCreateTransfer\x12%.transaction.v1.CreateTransferRequest\x1a&.transaction.v1.CreateTransferResponse\x12V\n" +
 	"\vGetTransfer\x12\".transaction.v1.GetTransferRequest\x1a#.transaction.v1.GetTransferResponse\x12q\n" +
-	"\x14GetTransfersByWallet\x12+.transaction.v1.GetTransfersByWalletRequest\x1a,.transaction.v1.GetTransfersByWalletResponseBFZDgithub.com/egesarisac/SagaWallet/api/proto/transactionb\x06proto3"
+	"\x14GetTransfersByWallet\x12+.transaction.v1.GetTransfersByWalletRequest\x1a,.transaction.v1.GetTransfersByWalletResponseB6Z4github.com/egesarisac/SagaWallet/api/gen/transactionb\x06proto3"
 
 var (
 	file_transaction_proto_rawDescOnce sync.Once

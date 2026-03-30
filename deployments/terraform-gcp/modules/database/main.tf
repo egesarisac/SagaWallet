@@ -57,6 +57,20 @@ resource "neon_role" "transaction" {
   name       = "transaction_user"
 }
 
+# auth_db
+resource "neon_database" "auth" {
+  project_id = var.existing_project_id
+  branch_id  = neon_branch.main.id
+  name       = "auth_db"
+  owner_name = "neondb_owner"
+}
+
+resource "neon_role" "auth" {
+  project_id = var.existing_project_id
+  branch_id  = neon_branch.main.id
+  name       = "auth_user"
+}
+
 output "wallet_db_url" {
   value     = "postgres://${neon_role.wallet.name}:${neon_role.wallet.password}@${neon_endpoint.main.host}/${neon_database.wallet.name}?sslmode=require"
   sensitive = true
@@ -64,5 +78,10 @@ output "wallet_db_url" {
 
 output "transaction_db_url" {
   value     = "postgres://${neon_role.transaction.name}:${neon_role.transaction.password}@${neon_endpoint.main.host}/${neon_database.transaction.name}?sslmode=require"
+  sensitive = true
+}
+
+output "auth_db_url" {
+  value     = "postgres://${neon_role.auth.name}:${neon_role.auth.password}@${neon_endpoint.main.host}/${neon_database.auth.name}?sslmode=require"
   sensitive = true
 }

@@ -27,6 +27,7 @@ jobs:
           - pkg/middleware
           - pkg/errors
           - api
+          - services/auth-service
           - services/wallet-service
           - services/transaction-service
           - services/notification-service
@@ -60,6 +61,7 @@ jobs:
       matrix:
         module:
           - pkg/middleware
+          - services/auth-service
           - services/wallet-service
           - services/transaction-service
           - services/notification-service
@@ -83,7 +85,83 @@ jobs:
     name: PR Checks
     runs-on: ubuntu-latest
     needs: [lint, test]
-    if: ${{ always() }}
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      id-token: write # Required for GCP auth
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - auth-service
+          - wallet-service
+          - transaction-service
+          - notification-service
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Auth to GCP for GAR push
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set DOCKER_CONFIG
+        run: echo "DOCKER_CONFIG=$RUNNER_TEMP/.docker" >> "$GITHUB_ENV"
+
+      - name: Init Docker config
+        run: mkdir -p "$DOCKER_CONFIG"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Artifact Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: _json_key
+          password: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_PREFIX }}${{ matrix.service }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: build/docker/${{ matrix.service }}.Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ===================
+  # Deploy to Cloud Run
+  # ===================
+  deploy:
+    name: Deploy (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    needs: build
+    # Deploy only on pushes to main
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    strategy:
+      matrix:
+        service:
+          - auth-service
+          - wallet-service
+          - transaction-service
+          - notification-service
 
     steps:
       - name: Ensure required PR jobs passed

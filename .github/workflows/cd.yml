@@ -1,9 +1,9 @@
-name: CI
+name: CD
 
 on:
-  pull_request:
+  push:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -12,80 +12,19 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  REGISTRY: us-central1-docker.pkg.dev
+  GCP_PROJECT_ID: go-fintech-microservices
+  IMAGE_PREFIX: us-central1-docker.pkg.dev/go-fintech-microservices/go-fintech/
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   # ===================
-  # Lint (parallel per module)
+  # Build Docker Images (parallel per service)
   # ===================
-  lint:
-    name: Lint (${{ matrix.module }})
+  build:
+    name: Build (${{ matrix.service }})
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        module:
-          - pkg
-          - pkg/middleware
-          - pkg/errors
-          - api
-          - services/auth-service
-          - services/wallet-service
-          - services/transaction-service
-          - services/notification-service
-          - tests/integration
-          - tools/tokengen
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-          cache-dependency-path: ${{ matrix.module }}/go.sum
-
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
-          working-directory: ${{ matrix.module }}
-          args: --timeout=5m
-          install-mode: goinstall
-
-  # ===================
-  # Test (parallel per module)
-  # ===================
-  test:
-    name: Test (${{ matrix.module }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        module:
-          - pkg/middleware
-          - services/auth-service
-          - services/wallet-service
-          - services/transaction-service
-          - services/notification-service
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-          cache-dependency-path: ${{ matrix.module }}/go.sum
-
-      - name: Run tests
-        working-directory: ${{ matrix.module }}
-        run: go test -v -race ./...
-
-  # ===================
-  # Stable PR status check for branch protection
-  # ===================
-  pr-gate:
-    name: PR Checks
-    runs-on: ubuntu-latest
-    needs: [lint, test]
-    if: github.event_name == 'push'
     permissions:
       contents: read
       id-token: write # Required for GCP auth
@@ -95,7 +34,6 @@ jobs:
       fail-fast: false
       matrix:
         service:
-          - auth-service
           - wallet-service
           - transaction-service
           - notification-service
@@ -153,12 +91,9 @@ jobs:
     name: Deploy (${{ matrix.service }})
     runs-on: ubuntu-latest
     needs: build
-    # Deploy only on pushes to main
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     strategy:
       matrix:
         service:
-          - auth-service
           - wallet-service
           - transaction-service
           - notification-service
@@ -171,18 +106,7 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Deploy to Cloud Run (wallet/transaction)
-        if: matrix.service == 'wallet-service' || matrix.service == 'transaction-service'
-        uses: google-github-actions/deploy-cloudrun@v2
-        with:
-          service: ${{ matrix.service }}
-          image: ${{ env.IMAGE_PREFIX }}${{ matrix.service }}:latest
-          region: us-central1
-          env_vars: WALLET_GRPC_TOKEN=${{ secrets.TF_VAR_wallet_grpc_token }}
-          env_vars_update_strategy: merge
-
-      - name: Deploy to Cloud Run (other services)
-        if: matrix.service != 'wallet-service' && matrix.service != 'transaction-service'
+      - name: Deploy to Cloud Run
         uses: google-github-actions/deploy-cloudrun@v2
         with:
           service: ${{ matrix.service }}

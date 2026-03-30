@@ -178,7 +178,7 @@ jobs:
           service: ${{ matrix.service }}
           image: ${{ env.IMAGE_PREFIX }}${{ matrix.service }}:latest
           region: us-central1
-          env_vars: WALLET_GRPC_TOKEN=${{ secrets.TF_VAR_wallet_grpc_token }}
+          env_vars: WALLET_GRPC_TOKEN=${{ secrets.TF_VAR_WALLET_GRPC_TOKEN }}
           env_vars_update_strategy: merge
 
       - name: Deploy to Cloud Run (other services)

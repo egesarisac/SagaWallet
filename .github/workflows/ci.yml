@@ -27,6 +27,7 @@ jobs:
           - pkg/middleware
           - pkg/errors
           - api
+          - services/auth-service
           - services/wallet-service
           - services/transaction-service
           - services/notification-service
@@ -60,6 +61,7 @@ jobs:
       matrix:
         module:
           - pkg/middleware
+          - services/auth-service
           - services/wallet-service
           - services/transaction-service
           - services/notification-service
@@ -93,6 +95,7 @@ jobs:
       fail-fast: false
       matrix:
         service:
+          - auth-service
           - wallet-service
           - transaction-service
           - notification-service
@@ -155,6 +158,7 @@ jobs:
     strategy:
       matrix:
         service:
+          - auth-service
           - wallet-service
           - transaction-service
           - notification-service

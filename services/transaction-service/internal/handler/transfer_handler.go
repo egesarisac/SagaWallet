@@ -9,6 +9,7 @@ import (
 
 	apperrors "github.com/egesarisac/SagaWallet/pkg/errors"
 	"github.com/egesarisac/SagaWallet/pkg/logger"
+	"github.com/egesarisac/SagaWallet/pkg/middleware"
 	"github.com/egesarisac/SagaWallet/services/transaction-service/internal/service"
 )
 
@@ -51,6 +52,14 @@ func (h *TransferHandler) CreateTransfer(c *gin.Context) {
 		return
 	}
 
+	requestUserID, err := uuid.Parse(middleware.GetUserID(c))
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, apperrors.ErrorResponse{
+			Error: apperrors.New(apperrors.CodeUnauthorized, "invalid or missing user context"),
+		})
+		return
+	}
+
 	senderID, err := uuid.Parse(req.SenderWalletID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, apperrors.ErrorResponse{
@@ -86,6 +95,7 @@ func (h *TransferHandler) CreateTransfer(c *gin.Context) {
 	}
 
 	result, err := h.svc.CreateTransfer(c.Request.Context(), service.CreateTransferInput{
+		RequestUserID:    requestUserID,
 		SenderWalletID:   senderID,
 		ReceiverWalletID: receiverID,
 		Amount:           req.Amount,
@@ -120,7 +130,15 @@ func (h *TransferHandler) GetTransfer(c *gin.Context) {
 		return
 	}
 
-	result, err := h.svc.GetTransfer(c.Request.Context(), transferID)
+	requestUserID, err := uuid.Parse(middleware.GetUserID(c))
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, apperrors.ErrorResponse{
+			Error: apperrors.New(apperrors.CodeUnauthorized, "invalid or missing user context"),
+		})
+		return
+	}
+
+	result, err := h.svc.GetTransfer(c.Request.Context(), transferID, requestUserID)
 	if err != nil {
 		if appErr, ok := err.(*apperrors.AppError); ok {
 			c.JSON(appErr.HTTPStatus(), apperrors.ErrorResponse{Error: appErr})

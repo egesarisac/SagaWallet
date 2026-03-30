@@ -1,0 +1,17 @@
+SERVICE_NAME: "auth-service"
+HTTP_PORT: 8085
+
+# Database
+DB_HOST: "localhost"
+DB_PORT: 5435
+DB_USER: "auth_user"
+DB_PASSWORD: "auth_secret"
+DB_NAME: "auth_db"
+DB_SSLMODE: "disable"
+
+# Logging
+LOG_LEVEL: "debug"
+LOG_FORMAT: "console"
+
+# JWT Authentication
+JWT_SECRET: "dev-local-jwt-secret-change-me"

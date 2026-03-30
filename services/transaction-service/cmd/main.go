@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -113,7 +114,12 @@ func main() {
 		walletGrpcAddr = os.Getenv("WALLET_GRPC_ADDR")
 	}
 
-	walletClient, err := grpc_client.NewWalletClient(walletGrpcAddr, log)
+	walletGrpcToken := os.Getenv("WALLET_GRPC_TOKEN")
+	if strings.TrimSpace(walletGrpcToken) == "" {
+		log.Fatal().Msg("WALLET_GRPC_TOKEN is required for wallet gRPC internal service authentication")
+	}
+
+	walletClient, err := grpc_client.NewWalletClient(walletGrpcAddr, walletGrpcToken, log)
 	if err != nil {
 		log.WithError(err).Warn().Msg("Failed to connect to Wallet gRPC service (non-fatal)")
 	} else {
@@ -123,7 +129,7 @@ func main() {
 
 	// Initialize layers
 	transferRepo := repository.NewTransferRepository(dbPool)
-	transferService := service.NewTransferService(transferRepo, producer, log)
+	transferService := service.NewTransferService(transferRepo, producer, walletClient, log)
 	transferHandler := handler.NewTransferHandler(transferService, log)
 
 	// Set dependencies for health checks

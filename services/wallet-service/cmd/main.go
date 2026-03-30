@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -153,7 +154,14 @@ func main() {
 		log.WithError(err).Fatal().Msg("Failed to listen for gRPC")
 	}
 
-	grpcServer := grpc.NewServer()
+	walletGrpcToken := os.Getenv("WALLET_GRPC_TOKEN")
+	if strings.TrimSpace(walletGrpcToken) == "" {
+		log.Fatal().Msg("WALLET_GRPC_TOKEN is required for wallet gRPC internal service authentication")
+	}
+
+	grpcServer := grpc.NewServer(
+		grpc.UnaryInterceptor(grpc_internal.ServiceAuthUnaryInterceptor(walletGrpcToken, log)),
+	)
 	pb.RegisterWalletServiceServer(grpcServer, grpc_internal.NewServer(walletService, log))
 
 	go func() {

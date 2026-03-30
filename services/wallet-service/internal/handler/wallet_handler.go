@@ -10,6 +10,8 @@ import (
 
 	apperrors "github.com/egesarisac/SagaWallet/pkg/errors"
 	"github.com/egesarisac/SagaWallet/pkg/logger"
+	"github.com/egesarisac/SagaWallet/pkg/middleware"
+	db "github.com/egesarisac/SagaWallet/services/wallet-service/db/generated"
 	"github.com/egesarisac/SagaWallet/services/wallet-service/internal/service"
 )
 
@@ -63,7 +65,7 @@ func numericToString(n pgtype.Numeric) string {
 
 // CreateWalletRequest is the request body for creating a wallet.
 type CreateWalletRequest struct {
-	UserID   string `json:"user_id" binding:"required,uuid"`
+	UserID   string `json:"user_id" binding:"omitempty,uuid"`
 	Currency string `json:"currency" binding:"omitempty,len=3"`
 }
 
@@ -87,7 +89,17 @@ func (h *WalletHandler) CreateWallet(c *gin.Context) {
 		return
 	}
 
-	userID, _ := uuid.Parse(req.UserID)
+	userID, err := h.getAuthenticatedUserID(c)
+	if err != nil {
+		h.respondError(c, err)
+		return
+	}
+
+	if req.UserID != "" && req.UserID != userID.String() {
+		h.respondError(c, apperrors.New(apperrors.CodeForbidden, "user_id in request does not match authenticated user"))
+		return
+	}
+
 	wallet, err := h.svc.CreateWallet(c.Request.Context(), service.CreateWalletInput{
 		UserID:   userID,
 		Currency: req.Currency,
@@ -117,9 +129,8 @@ func (h *WalletHandler) GetWallet(c *gin.Context) {
 		return
 	}
 
-	wallet, err := h.svc.GetWallet(c.Request.Context(), walletID)
-	if err != nil {
-		h.respondError(c, err)
+	wallet, ok := h.getOwnedWallet(c, walletID)
+	if !ok {
 		return
 	}
 
@@ -143,17 +154,16 @@ func (h *WalletHandler) GetBalance(c *gin.Context) {
 		return
 	}
 
-	balance, currency, err := h.svc.GetBalance(c.Request.Context(), walletID)
-	if err != nil {
-		h.respondError(c, err)
+	wallet, ok := h.getOwnedWallet(c, walletID)
+	if !ok {
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"data": gin.H{
 			"wallet_id": walletID.String(),
-			"balance":   balance,
-			"currency":  currency,
+			"balance":   numericToString(wallet.Balance),
+			"currency":  wallet.Currency,
 		},
 	})
 }
@@ -170,6 +180,10 @@ func (h *WalletHandler) Credit(c *gin.Context) {
 	walletID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		h.respondError(c, apperrors.New(apperrors.CodeValidationFailed, "Invalid wallet ID"))
+		return
+	}
+
+	if _, ok := h.getOwnedWallet(c, walletID); !ok {
 		return
 	}
 
@@ -215,6 +229,10 @@ func (h *WalletHandler) Debit(c *gin.Context) {
 		return
 	}
 
+	if _, ok := h.getOwnedWallet(c, walletID); !ok {
+		return
+	}
+
 	var req DebitRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		h.respondError(c, apperrors.New(apperrors.CodeValidationFailed, err.Error()))
@@ -247,6 +265,10 @@ func (h *WalletHandler) GetTransactions(c *gin.Context) {
 	walletID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		h.respondError(c, apperrors.New(apperrors.CodeValidationFailed, "Invalid wallet ID"))
+		return
+	}
+
+	if _, ok := h.getOwnedWallet(c, walletID); !ok {
 		return
 	}
 
@@ -293,6 +315,10 @@ func (h *WalletHandler) UpdateStatus(c *gin.Context) {
 		return
 	}
 
+	if _, ok := h.getOwnedWallet(c, walletID); !ok {
+		return
+	}
+
 	var req UpdateStatusRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		h.respondError(c, apperrors.New(apperrors.CodeValidationFailed, err.Error()))
@@ -330,11 +356,50 @@ func (h *WalletHandler) respondError(c *gin.Context, err error) {
 	})
 }
 
+func (h *WalletHandler) getAuthenticatedUserID(c *gin.Context) (uuid.UUID, error) {
+	authUserID := middleware.GetUserID(c)
+	if authUserID == "" {
+		return uuid.Nil, apperrors.New(apperrors.CodeUnauthorized, "missing authenticated user context")
+	}
+
+	userID, err := uuid.Parse(authUserID)
+	if err != nil {
+		return uuid.Nil, apperrors.New(apperrors.CodeUnauthorized, "invalid authenticated user context")
+	}
+
+	return userID, nil
+}
+
+func (h *WalletHandler) getOwnedWallet(c *gin.Context, walletID uuid.UUID) (*db.Wallet, bool) {
+	authUserID, err := h.getAuthenticatedUserID(c)
+	if err != nil {
+		h.respondError(c, err)
+		return nil, false
+	}
+
+	wallet, err := h.svc.GetWallet(c.Request.Context(), walletID)
+	if err != nil {
+		h.respondError(c, err)
+		return nil, false
+	}
+
+	if pgtypeToUUID(wallet.UserID) != authUserID {
+		h.respondError(c, apperrors.New(apperrors.CodeForbidden, "wallet does not belong to authenticated user"))
+		return nil, false
+	}
+
+	return wallet, true
+}
+
 // DeleteWallet handles wallet deletion (for testing cleanup).
 func (h *WalletHandler) DeleteWallet(c *gin.Context) {
 	walletID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		h.respondError(c, apperrors.New(apperrors.CodeValidationFailed, "Invalid wallet ID"))
+		return
+	}
+
+	if _, ok := h.getOwnedWallet(c, walletID); !ok {
 		return
 	}
 

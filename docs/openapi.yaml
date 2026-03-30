@@ -8,9 +8,18 @@ info:
     - **Wallet Service** (localhost:8081): Wallet management, balance operations
     - **Transaction Service** (localhost:8083): Transfer orchestration
     
-    ## Authentication
+    ## User Authentication
     All `/api/v1/*` endpoints require JWT authentication.
     Include the token in the `Authorization` header as `Bearer <token>`.
+
+    ## Resource Ownership Authorization
+    - Wallet endpoints enforce ownership by authenticated user.
+    - Transfer creation requires ownership of `sender_wallet_id`.
+    - Transfer read requires authenticated user to be sender or receiver.
+
+    ## Internal Service Authentication
+    Internal gRPC calls from `transaction-service` to `wallet-service` require
+    metadata token `x-service-token` using shared `WALLET_GRPC_TOKEN`.
     
     ## Rate Limiting
     Rate limiting can be enabled/disabled via DISABLE_RATE_LIMIT env var.
@@ -74,7 +83,7 @@ paths:
     post:
       tags: [Wallets]
       summary: Create a new wallet
-      description: Creates a new wallet for a user
+      description: Creates a new wallet for the authenticated user
       security:
         - bearerAuth: []
       requestBody:
@@ -94,6 +103,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '409':
           description: Wallet already exists for this user and currency
           content:
@@ -119,6 +130,8 @@ paths:
                 $ref: '#/components/schemas/WalletResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
     delete:
@@ -134,6 +147,8 @@ paths:
           description: Wallet deleted successfully
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
 
@@ -166,6 +181,12 @@ paths:
                       currency:
                         type: string
                         example: TRY
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /api/v1/wallets/{id}/credit:
     post:
@@ -188,11 +209,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/WalletResponse'
+                $ref: '#/components/schemas/BalanceMutationResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
 
@@ -217,7 +240,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/WalletResponse'
+                $ref: '#/components/schemas/BalanceMutationResponse'
         '400':
           description: Invalid amount or insufficient funds
           content:
@@ -226,6 +249,8 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
 
@@ -261,6 +286,12 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/Transaction'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /api/v1/wallets/{id}/status:
     put:
@@ -289,6 +320,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/WalletResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   # ===================
   # Transaction Service Endpoints
@@ -301,6 +338,8 @@ paths:
       description: |
         Initiates a transfer between two wallets using the Saga pattern.
         The transfer is processed asynchronously.
+
+        Transfer creation requires authenticated ownership of `sender_wallet_id`.
         
         **Server**: Transaction Service
       servers:
@@ -332,17 +371,13 @@ paths:
                         format: uuid
                       status:
                         type: string
-                        enum: [PENDING]
+                        enum: [PENDING, DEBITED, COMPLETED, REFUNDING, FAILED, MANUAL_REVIEW]
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
-        '409':
-          description: Duplicate transfer (same idempotency key)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
 
   /api/v1/transfers/{id}:
     get:
@@ -350,6 +385,8 @@ paths:
       summary: Get transfer status
       description: |
         Returns the current status of a transfer.
+
+        Authenticated user must be sender or receiver wallet owner.
         
         **Server**: Transaction Service (localhost:8083)
       servers:
@@ -374,6 +411,8 @@ paths:
                 $ref: '#/components/schemas/TransferResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
 
@@ -407,6 +446,12 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: Authenticated user is not allowed to access this resource
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
     NotFound:
       description: Resource not found
       content:
@@ -417,16 +462,17 @@ components:
   schemas:
     CreateWalletRequest:
       type: object
-      required: [user_id, currency]
       properties:
         user_id:
           type: string
           format: uuid
           example: "550e8400-e29b-41d4-a716-446655440000"
+          description: Optional. If provided, must match token user ID.
         currency:
           type: string
           enum: [TRY, USD, EUR]
           example: TRY
+          description: Optional. Defaults to TRY.
 
     WalletResponse:
       type: object
@@ -468,6 +514,22 @@ components:
         description:
           type: string
           example: "Deposit"
+
+    BalanceMutationResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            wallet_id:
+              type: string
+              format: uuid
+            new_balance:
+              type: string
+              example: "900.00"
+            currency:
+              type: string
+              example: TRY
 
     Transaction:
       type: object
@@ -515,31 +577,12 @@ components:
         data:
           type: object
           properties:
-            id:
+            transfer_id:
               type: string
               format: uuid
-            sender_wallet_id:
-              type: string
-              format: uuid
-            receiver_wallet_id:
-              type: string
-              format: uuid
-            amount:
-              type: string
-            currency:
-              type: string
             status:
               type: string
-              enum: [PENDING, DEBITED, COMPLETED, REFUNDING, FAILED]
-            failure_reason:
-              type: string
-              nullable: true
-            created_at:
-              type: string
-              format: date-time
-            updated_at:
-              type: string
-              format: date-time
+              enum: [PENDING, DEBITED, COMPLETED, REFUNDING, FAILED, MANUAL_REVIEW]
 
     ErrorResponse:
       type: object

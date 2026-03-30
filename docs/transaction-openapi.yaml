@@ -5,9 +5,13 @@ info:
     Transfer orchestration service for the SagaWallet platform.
     Uses Saga Choreography pattern for distributed transactions.
     
-    ## Authentication
+    ## User Authentication
     All `/api/v1/*` endpoints require JWT authentication.
     Include the token in the `Authorization` header as `Bearer <token>`.
+
+    ## Resource Ownership Authorization
+    - Transfer creation requires authenticated ownership of `sender_wallet_id`
+    - Transfer read requires authenticated user to be sender or receiver wallet owner
   version: 1.0.0
   contact:
     name: API Support
@@ -70,6 +74,7 @@ paths:
         3. Receiver wallet credited (COMPLETED)
         
         If any step fails, compensation is triggered automatically.
+        Existing transfers found by the same `idempotency_key` are returned when owned by the same authenticated user.
       security:
         - bearerAuth: []
       requestBody:
@@ -94,13 +99,13 @@ paths:
                         format: uuid
                       status:
                         type: string
-                        enum: [PENDING]
+                        enum: [PENDING, DEBITED, COMPLETED, REFUNDING, FAILED, MANUAL_REVIEW]
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
-        '409':
-          description: Duplicate transfer (same idempotency key)
+        '403':
+          $ref: '#/components/responses/Forbidden'
 
   /api/v1/transfers/{id}:
     get:
@@ -126,6 +131,8 @@ paths:
                 $ref: '#/components/schemas/TransferResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
 
@@ -141,6 +148,8 @@ components:
       description: Invalid request
     Unauthorized:
       description: Missing or invalid authentication
+    Forbidden:
+      description: Authenticated user is not allowed to access this resource
     NotFound:
       description: Resource not found
 
@@ -168,28 +177,9 @@ components:
         data:
           type: object
           properties:
-            id:
+            transfer_id:
               type: string
               format: uuid
-            sender_wallet_id:
-              type: string
-              format: uuid
-            receiver_wallet_id:
-              type: string
-              format: uuid
-            amount:
-              type: string
-            currency:
-              type: string
             status:
               type: string
-              enum: [PENDING, DEBITED, COMPLETED, REFUNDING, FAILED]
-            failure_reason:
-              type: string
-              nullable: true
-            created_at:
-              type: string
-              format: date-time
-            updated_at:
-              type: string
-              format: date-time
+              enum: [PENDING, DEBITED, COMPLETED, REFUNDING, FAILED, MANUAL_REVIEW]

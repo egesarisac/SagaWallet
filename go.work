@@ -5,6 +5,7 @@ use (
 	./pkg
 	./pkg/errors
 	./pkg/middleware
+	./services/auth-service
 	./services/notification-service
 	./services/transaction-service
 	./services/wallet-service

@@ -39,6 +39,25 @@ services:
     networks:
       - go-fintech-full
 
+  auth-db:
+    image: postgres:16-alpine
+    container_name: auth-db-full
+    environment:
+      POSTGRES_USER: auth_user
+      POSTGRES_PASSWORD: ${AUTH_DB_PASSWORD:-auth_secret}
+      POSTGRES_DB: auth_db
+    ports:
+      - "5435:5432"
+    volumes:
+      - auth_data_full:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U auth_user -d auth_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - go-fintech-full
+
   redpanda:
     image: redpandadata/redpanda:v23.3.5
     container_name: redpanda-full
@@ -105,6 +124,7 @@ services:
       DB_SSLMODE: disable
       KAFKA_BROKERS: redpanda-full:29092
       JWT_SECRET: ${JWT_SECRET:-dev-local-jwt-secret-change-me}
+      WALLET_GRPC_TOKEN: ${WALLET_GRPC_TOKEN}
       DISABLE_RATE_LIMIT: "true"
     depends_on:
       wallet-db:
@@ -132,6 +152,7 @@ services:
       KAFKA_BROKERS: redpanda-full:29092
       WALLET_GRPC_ADDR: wallet-service:9081
       JWT_SECRET: ${JWT_SECRET:-dev-local-jwt-secret-change-me}
+      WALLET_GRPC_TOKEN: ${WALLET_GRPC_TOKEN}
       DISABLE_RATE_LIMIT: "true"
     depends_on:
       transaction-db:
@@ -155,6 +176,32 @@ services:
       DISABLE_RATE_LIMIT: "true"
     depends_on:
       redpanda:
+        condition: service_healthy
+    networks:
+      - go-fintech-full
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: build/docker/auth-service.Dockerfile
+    container_name: auth-service
+    ports:
+      - "8085:8080"
+    environment:
+      PORT: 8080
+      DB_HOST: auth-db-full
+      DB_PORT: 5432
+      DB_USER: auth_user
+      DB_PASSWORD: ${AUTH_DB_PASSWORD:-auth_secret}
+      DB_NAME: auth_db
+      DB_SSLMODE: disable
+      JWT_SECRET: ${JWT_SECRET:-dev-local-jwt-secret-change-me}
+      ACCESS_TOKEN_EXPIRY_MINUTES: 15
+      REFRESH_TOKEN_EXPIRY_HOURS: 168
+      JWT_ISSUER: sagawallet-auth
+      DISABLE_RATE_LIMIT: "true"
+    depends_on:
+      auth-db:
         condition: service_healthy
     networks:
       - go-fintech-full
@@ -188,6 +235,7 @@ services:
 volumes:
   wallet_data_full:
   transaction_data_full:
+  auth_data_full:
   redpanda_data_full:
 
 networks:

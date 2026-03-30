@@ -43,6 +43,25 @@ services:
     networks:
       - go-fintech
 
+  auth-db:
+    image: postgres:16-alpine
+    container_name: auth-db
+    environment:
+      POSTGRES_USER: auth_user
+      POSTGRES_PASSWORD: ${AUTH_DB_PASSWORD:-auth_secret}
+      POSTGRES_DB: auth_db
+    ports:
+      - "5435:5432"
+    volumes:
+      - auth_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U auth_user -d auth_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - go-fintech
+
   # ===================
   # Kafka (using Redpanda for simplicity - no Zookeeper needed)
   # ===================
@@ -123,6 +142,7 @@ services:
 volumes:
   wallet_data:
   transaction_data:
+  auth_data:
   redpanda_data:
 
 networks:

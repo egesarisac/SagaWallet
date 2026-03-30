@@ -106,7 +106,28 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Deploy to Cloud Run
+      - name: Validate internal gRPC token secret
+        if: matrix.service == 'wallet-service' || matrix.service == 'transaction-service'
+        env:
+          WALLET_GRPC_TOKEN: ${{ secrets.TF_VAR_wallet_grpc_token }}
+        run: |
+          if [ -z "$WALLET_GRPC_TOKEN" ]; then
+            echo "Missing required GitHub secret: TF_VAR_wallet_grpc_token"
+            exit 1
+          fi
+
+      - name: Deploy to Cloud Run (wallet/transaction)
+        if: matrix.service == 'wallet-service' || matrix.service == 'transaction-service'
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ matrix.service }}
+          image: ${{ env.IMAGE_PREFIX }}${{ matrix.service }}:latest
+          region: us-central1
+          env_vars: WALLET_GRPC_TOKEN=${{ secrets.TF_VAR_wallet_grpc_token }}
+          env_vars_update_strategy: merge
+
+      - name: Deploy to Cloud Run (other services)
+        if: matrix.service != 'wallet-service' && matrix.service != 'transaction-service'
         uses: google-github-actions/deploy-cloudrun@v2
         with:
           service: ${{ matrix.service }}

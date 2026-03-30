@@ -1,4 +1,7 @@
 🚀 Go-Fintech: Dağıtık Cüzdan Sistemi (Saga Pattern ile)
+
+> Not: Bu dokuman tarihsel bir taslak niteligindedir. Guncel mimari, guvenlik ve calistirma adimlari icin README.md ve docs/PRD.md dosyalarini baz alin.
+
 Bu proje, yüksek performanslı, ölçeklenebilir ve tutarlı bir dijital cüzdan altyapısını mikroservis mimarisiyle simüle etmeyi hedefler.
 
 🏗 Mimari Genel Bakış

@@ -21,7 +21,9 @@
 |---------|-------------|
 | 🔄 **Saga Pattern** | Event-driven choreography with automatic compensation (rollback) |
 | ⚡ **High Performance** | Go's concurrency model for low-latency operations |
-| 🔐 **JWT Authentication** | Secure API endpoints with token-based auth |
+| 🔐 **User Authentication (JWT)** | Secure API endpoints with token-based auth |
+| 🛡️ **Resource Ownership Authorization** | Wallet and transfer access is enforced by authenticated identity |
+| 🔒 **Internal Service Authentication** | Wallet gRPC calls require `WALLET_GRPC_TOKEN` metadata |
 | 🚦 **Rate Limiting** | Token bucket algorithm (100 req/min per IP) |
 | 📊 **Prometheus Metrics** | Built-in `/metrics` endpoints for observability |
 | 📨 **Event-Driven** | Kafka (Redpanda) based async communication |
@@ -46,7 +48,10 @@
 git clone https://github.com/egesarisac/sagawallet.git
 cd sagawallet
 
-# Start everything (databases, Kafka, all 3 services)
+# Prepare environment variables
+cp .env.example .env
+
+# Start everything (databases, Kafka, all 4 services)
 docker compose -f docker-compose.full.yml up --build
 ```
 
@@ -54,6 +59,7 @@ docker compose -f docker-compose.full.yml up --build
 - Wallet Service: http://localhost:8081
 - Transaction Service: http://localhost:8083
 - Notification Service: http://localhost:8084
+- Auth Service: http://localhost:8085
 - Kafka UI: http://localhost:8080
 - Prometheus: http://localhost:9090
 
@@ -68,6 +74,7 @@ make migrate-wallet
 make migrate-txn
 
 # Run services in separate terminals
+cd services/auth-service && go run cmd/main.go
 cd services/wallet-service && go run cmd/main.go
 cd services/transaction-service && go run cmd/main.go
 cd services/notification-service && go run cmd/main.go
@@ -75,9 +82,26 @@ cd services/notification-service && go run cmd/main.go
 
 ---
 
-## 🔑 Authentication
+## 🔑 Security Model
 
-All `/api/v1/*` endpoints require JWT authentication.
+User Authentication (JWT):
+- All `/api/v1/*` endpoints require JWT authentication.
+
+Internal Service Authentication:
+- Internal gRPC calls between `transaction-service` and `wallet-service` use `WALLET_GRPC_TOKEN`.
+- `WALLET_GRPC_TOKEN` is required in both services and must match.
+
+Resource Ownership Authorization:
+- Wallet read/write operations require ownership of the target wallet.
+- Transfer creation requires authenticated ownership of `sender_wallet_id`.
+- Transfer read requires authenticated user to be sender or receiver wallet owner.
+
+For Docker Compose, define both secrets in `.env`:
+
+```bash
+JWT_SECRET=your-jwt-secret
+WALLET_GRPC_TOKEN=your-internal-grpc-token
+```
 
 ### Generate a Token
 
@@ -119,6 +143,20 @@ curl -H "Authorization: Bearer <your-token>" \
 | `POST` | `/api/v1/transfers` | ✅ | Create transfer (initiates saga) |
 | `GET` | `/api/v1/transfers/:id` | ✅ | Get transfer status |
 
+### Auth Service (`:8085`)
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| `GET` | `/health` | ❌ | Health check |
+| `POST` | `/api/v1/auth/register` | ❌ | Register user (email/password) |
+| `POST` | `/api/v1/auth/login` | ❌ | Login and receive access/refresh tokens |
+| `POST` | `/api/v1/auth/refresh` | ❌ | Rotate refresh token and issue new access token |
+| `POST` | `/api/v1/auth/logout` | ❌ | Revoke refresh token |
+| `GET` | `/api/v1/auth/oauth/google/start` | ❌ | Google OAuth scaffold endpoint |
+| `POST` | `/api/v1/auth/oauth/google/callback` | ❌ | Google OAuth callback scaffold |
+| `GET` | `/api/v1/auth/oauth/apple/start` | ❌ | Apple OAuth scaffold endpoint |
+| `POST` | `/api/v1/auth/oauth/apple/callback` | ❌ | Apple OAuth callback scaffold |
+
 ### Example: Create a Transfer
 
 ```bash
@@ -147,6 +185,8 @@ curl -H "Authorization: Bearer $TOKEN" \
 ---
 
 ## 🏗 Architecture
+
+Authentication is handled by a dedicated `auth-service` that issues access/refresh tokens used by wallet and transaction APIs.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -250,6 +290,7 @@ sagawallet/
 ├── deployments/            # Infrastructure as Code
 │   └── terraform-gcp/      # GCP (Cloud Run, VPC, Cloud SQL)
 ├── services/
+│   ├── auth-service/       # Login, refresh token, OAuth scaffolding
 │   ├── wallet-service/     # Wallet management
 │   ├── transaction-service/ # Transfer orchestration
 │   └── notification-service/ # Notifications (Kafka consumer)
@@ -268,6 +309,7 @@ sagawallet/
 |---------|-------------|
 | `make docker-up` | Start infrastructure (Postgres, Kafka) |
 | `make docker-down` | Stop all containers |
+| `make run-auth` | Run Auth Service |
 | `make run-wallet` | Run Wallet Service |
 | `make run-transaction` | Run Transaction Service |
 | `make run-notification` | Run Notification Service |

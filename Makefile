@@ -12,6 +12,7 @@ help:
 	@echo "  make test-integration   Run integration tests (requires running services)"
 	@echo "  make lint               Run linter"
 	@echo "  make run-wallet         Run wallet service"
+	@echo "  make run-auth           Run auth service"
 	@echo "  make run-transaction    Run transaction service"
 	@echo "  make run-notification   Run notification service"
 	@echo "  make docker-up          Start infrastructure (Postgres, Kafka)"
@@ -57,12 +58,14 @@ migrate-txn-down:
 test:
 	@echo "Running all unit tests..."
 	@cd pkg/middleware && go test ./... -v -cover
+	@cd services/auth-service && go test ./... -v -cover
 	@cd services/wallet-service && go test ./... -v -cover
 	@cd services/transaction-service && go test ./... -v -cover
 
 test-unit:
 	@echo "Running unit tests..."
 	@cd pkg/middleware && go test ./... -v -cover
+	@cd services/auth-service && go test ./... -v -cover
 	@cd services/wallet-service && go test ./... -v -cover
 	@cd services/transaction-service && go test ./... -v -cover
 
@@ -73,6 +76,10 @@ test-integration:
 test-wallet:
 	@echo "Running wallet service tests..."
 	@cd services/wallet-service && go test ./... -v -cover
+
+test-auth:
+	@echo "Running auth service tests..."
+	@cd services/auth-service && go test ./... -v -cover
 
 test-txn:
 	@echo "Running transaction service tests..."
@@ -118,6 +125,10 @@ run-wallet:
 	@echo "Starting wallet service..."
 	@cd services/wallet-service && go run cmd/main.go
 
+run-auth:
+	@echo "Starting auth service..."
+	@cd services/auth-service && go run cmd/main.go
+
 run-transaction:
 	@echo "Starting transaction service..."
 	@cd services/transaction-service && go run cmd/main.go
@@ -156,6 +167,7 @@ docker-clean:
 tidy:
 	@echo "Running go mod tidy for all modules..."
 	@cd pkg && go mod tidy
+	@cd services/auth-service && go mod tidy
 	@cd services/wallet-service && go mod tidy
 	@cd services/transaction-service && go mod tidy
 	@cd services/notification-service && go mod tidy

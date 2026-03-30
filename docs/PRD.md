@@ -26,30 +26,31 @@ Go-Fintech is a high-performance, scalable, and consistent digital wallet infras
                                 │
         ┌───────────────────────┼───────────────────────┐
         ▼                       ▼                       ▼
-┌───────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│    Wallet     │     │   Transaction   │     │  Notification   │
-│    Service    │◄───►│     Service     │────►│    Service      │
-│  (Go + Gin)   │     │   (Go + Gin)    │     │     (Go)        │
-└───────┬───────┘     └────────┬────────┘     └─────────────────┘
-        │                      │
-        ▼                      ▼
+┌──────────────────┐  issues JWT/refresh  ┌───────────────┐
+│   Auth Service   │─────────────────────►│     Client    │
+└──────────────────┘                      └───────┬───────┘
+                         │
+                    Authorization: Bearer JWT
+                         │
+    ┌───────────────────────┬────────────────┴───────────────┐
+    ▼                       ▼                                ▼
+┌───────────────┐     ┌─────────────────┐              ┌─────────────────┐
+│    Wallet     │◄───►│   Transaction   │────Kafka────►│  Notification   │
+│    Service    │ gRPC│     Service     │              │    Service      │
+└───────┬───────┘ auth└────────┬────────┘              └─────────────────┘
+    │                      │
+    ▼                      ▼
 ┌───────────────┐     ┌─────────────────┐
 │  PostgreSQL   │     │   PostgreSQL    │
 │   (Wallets)   │     │ (Transactions)  │
 └───────────────┘     └─────────────────┘
-                                │
-                    ┌───────────┴───────────┐
-                    ▼                       ▼
-              ┌──────────┐           ┌──────────┐
-              │  Kafka   │◄─────────►│  Kafka   │
-              │ Producer │           │ Consumer │
-              └──────────┘           └──────────┘
 ```
 
 ### 2.2 Service Responsibilities
 
 | Service | Responsibility | Database |
 |---------|---------------|----------|
+| **Auth Service** | User registration/login, refresh token rotation, JWT issuance | PostgreSQL |
 | **Wallet Service** | Balance management (credit/debit operations) | PostgreSQL |
 | **Transaction Service** | Transaction history, transfer orchestration | PostgreSQL |
 | **Notification Service** | Async user notifications | N/A (stateless) |
@@ -65,6 +66,7 @@ Go-Fintech is a high-performance, scalable, and consistent digital wallet infras
 | Database | PostgreSQL + sqlc | Type-safe SQL code generation |
 | Inter-service Communication | gRPC (Protocol Buffers) | Fast, schema-driven communication |
 | Async Messaging | Kafka / Redpanda | Event-driven architecture, Saga support |
+| Authentication | JWT + refresh tokens + service token metadata | User auth + internal service trust boundaries |
 | Infrastructure | Terraform + GCP | Infrastructure as Code (Cloud Run) |
 | Configuration | Viper | Environment variable management (supports PORT/DATABASE_URL) |
 
@@ -195,6 +197,7 @@ service WalletService {
   rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
   rpc Credit(CreditRequest) returns (CreditResponse);
   rpc Debit(DebitRequest) returns (DebitResponse);
+    rpc GetWallet(GetWalletRequest) returns (GetWalletResponse);
 }
 ```
 
@@ -204,7 +207,15 @@ service WalletService {
 |--------|----------|-------------|
 | `POST` | `/api/v1/transfers` | Initiate transfer |
 | `GET` | `/api/v1/transfers/:id` | Get transfer status |
-| `GET` | `/api/v1/wallets/:id/transactions` | Get transaction history |
+
+### 5.3 Auth Service APIs
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/v1/auth/register` | Register user with email/password |
+| `POST` | `/api/v1/auth/login` | Login and receive access + refresh tokens |
+| `POST` | `/api/v1/auth/refresh` | Rotate refresh token and issue new access token |
+| `POST` | `/api/v1/auth/logout` | Revoke refresh token |
 
 ---
 
@@ -610,7 +621,7 @@ breaker := gobreaker.NewCircuitBreaker(gobreaker.Settings{
 
 ## 10. Authentication & Authorization
 
-### 10.1 JWT-Based Authentication
+### 10.1 User Authentication (JWT)
 
 All API requests require a valid JWT token in the `Authorization` header:
 
@@ -622,29 +633,36 @@ Authorization: Bearer <jwt_token>
 ```json
 {
   "sub": "user-uuid",
-  "wallet_id": "wallet-uuid",
+    "user_id": "user-uuid",
   "roles": ["user"],
   "iat": 1704888000,
   "exp": 1704974400
 }
 ```
 
-### 10.2 API Key for Service-to-Service
+### 10.2 Internal Service Authentication (gRPC Metadata Token)
 
-Internal gRPC calls use API keys:
+Internal wallet gRPC calls require service token metadata:
 
 ```
-X-API-Key: <service_api_key>
+x-service-token: <wallet_grpc_token>
+x-service-name: transaction-service
 ```
+
+`WALLET_GRPC_TOKEN` must match between `wallet-service` and `transaction-service`.
 
 ### 10.3 Authorization Rules
+
+Resource ownership authorization is enforced server-side.
 
 | Operation | Rule |
 |-----------|------|
 | View wallet | User owns the wallet |
 | Credit | User owns the wallet |
 | Debit | User owns the wallet |
-| Transfer | User owns sender wallet |
+| Update wallet status | User owns the wallet |
+| Delete wallet | User owns the wallet |
+| Create transfer | User owns sender wallet |
 | View transfer | User is sender or receiver |
 
 ### 10.4 Rate Limiting
@@ -796,6 +814,6 @@ In production (GCP), traces are exported to **Google Cloud Trace**. This allows 
 
 ---
 
-> **Document Version**: 1.1  
-> **Last Updated**: 2026-01-12  
+> **Document Version**: 1.2  
+> **Last Updated**: 2026-03-30  
 > **Author**: Development Team

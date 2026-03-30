@@ -13,6 +13,11 @@ output "notification_service_url" {
   value       = module.cloudrun.notification_service_url
 }
 
+output "auth_service_url" {
+  description = "Cloud Run URL for auth-service"
+  value       = module.cloudrun.auth_service_url
+}
+
 output "artifact_registry" {
   description = "Artifact Registry hostname for Docker pushes"
   value       = "${var.gcp_region}-docker.pkg.dev/${var.gcp_project_id}/go-fintech"
@@ -46,5 +51,10 @@ output "wallet_db_url" {
 
 output "transaction_db_url" {
   value     = module.database.transaction_db_url
+  sensitive = true
+}
+
+output "auth_db_url" {
+  value     = module.database.auth_db_url
   sensitive = true
 }

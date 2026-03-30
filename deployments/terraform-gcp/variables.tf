@@ -37,3 +37,9 @@ variable "jwt_secret" {
   type        = string
   sensitive   = true
 }
+
+variable "wallet_grpc_token" {
+  description = "Required internal service token for wallet<->transaction gRPC authentication"
+  type        = string
+  sensitive   = true
+}

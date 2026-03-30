@@ -85,14 +85,16 @@ module "kafka" {
 }
 
 module "cloudrun" {
-  source         = "./modules/cloudrun"
-  gcp_project_id = var.gcp_project_id
-  gcp_region     = var.gcp_region
-  image_prefix   = "${var.gcp_region}-docker.pkg.dev/${var.gcp_project_id}/go-fintech"
-  jwt_secret     = var.jwt_secret
+  source            = "./modules/cloudrun"
+  gcp_project_id    = var.gcp_project_id
+  gcp_region        = var.gcp_region
+  image_prefix      = "${var.gcp_region}-docker.pkg.dev/${var.gcp_project_id}/go-fintech"
+  jwt_secret        = var.jwt_secret
+  wallet_grpc_token = var.wallet_grpc_token
 
   wallet_db_url      = module.database.wallet_db_url
   transaction_db_url = module.database.transaction_db_url
+  auth_db_url        = module.database.auth_db_url
   kafka_brokers      = module.kafka.broker_url
   kafka_username     = module.kafka.username
   kafka_password     = module.kafka.password

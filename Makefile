@@ -1,4 +1,4 @@
-.PHONY: help proto migrate test test-unit test-integration run-wallet run-transaction run-notification docker-up docker-down lint
+.PHONY: help proto migrate test test-unit test-race test-integration ci fmt-check run-wallet run-transaction run-notification docker-up docker-down lint
 
 # Default target
 help:
@@ -9,7 +9,9 @@ help:
 	@echo "  make migrate-wallet     Run wallet service migrations"
 	@echo "  make migrate-txn        Run transaction service migrations"
 	@echo "  make test               Run all unit tests"
+	@echo "  make test-race          Run all unit tests with the race detector"
 	@echo "  make test-integration   Run integration tests against the full local stack"
+	@echo "  make ci                 Run the local validation checks used by CI"
 	@echo "  make lint               Run linter"
 	@echo "  make run-wallet         Run wallet service"
 	@echo "  make run-auth           Run auth service"
@@ -64,6 +66,20 @@ test:
 	@cd services/notification-service && go test ./... -v -cover
 
 test-unit: test
+
+test-race:
+	@echo "Running all unit tests with the race detector..."
+	@for module in pkg pkg/middleware pkg/errors api services/auth-service services/wallet-service services/transaction-service services/notification-service tools/tokengen tools/eventreplay; do \
+		(cd $$module && go test -race -covermode=atomic ./...); \
+	done
+
+fmt-check:
+	@unformatted="$$(find . -type f -name '*.go' -not -path './.codebase-memory/*' -exec gofmt -l {} +)"; \
+	if [ -n "$$unformatted" ]; then \
+		echo "Run gofmt on:"; echo "$$unformatted"; exit 1; \
+	fi
+
+ci: fmt-check lint test-race
 
 test-integration:
 	@echo "Running integration tests against the configured services..."
@@ -170,7 +186,9 @@ tidy:
 
 lint:
 	@echo "Running linter..."
-	@golangci-lint run ./...
+	@for module in api pkg pkg/errors pkg/middleware services/auth-service services/wallet-service services/transaction-service services/notification-service tests/integration tools/tokengen tools/eventreplay; do \
+		(cd $$module && golangci-lint run --timeout=5m ./...); \
+	done
 
 fmt:
 	@echo "Formatting code..."

@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -128,6 +129,9 @@ func Load(serviceName string) (*Config, error) {
 	v.AddConfigPath("./config")
 	v.AddConfigPath(".")
 	_ = v.ReadInConfig() // Ignore error if config file doesn't exist
+	if err := applyFileSecrets(v); err != nil {
+		return nil, err
+	}
 
 	cfg := &Config{
 		ServiceName: v.GetString("SERVICE_NAME"),
@@ -162,4 +166,30 @@ func Load(serviceName string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func applyFileSecrets(v *viper.Viper) error {
+	for _, name := range []string{
+		"DATABASE_URL",
+		"JWT_SECRET",
+		"KAFKA_BROKERS",
+		"KAFKA_USERNAME",
+		"KAFKA_PASSWORD",
+		"WALLET_GRPC_TOKEN",
+	} {
+		path := strings.TrimSpace(os.Getenv(name + "_FILE"))
+		if path == "" {
+			continue
+		}
+		value, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read %s_FILE: %w", name, err)
+		}
+		key := name
+		if name == "DATABASE_URL" {
+			key = "DB_DSN"
+		}
+		v.Set(key, strings.TrimSpace(string(value)))
+	}
+	return nil
 }

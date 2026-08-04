@@ -135,48 +135,43 @@ func main() {
 	// Set dependencies for health checks
 	handler.SetDependencies(&handler.Dependencies{DB: dbPool})
 
-	// Create Kafka consumer (raw) - listens to saga events
-	kafkaConsumer := kafka.NewConsumer(kafka.ConsumerConfig{
-		Brokers:  cfg.Kafka.Brokers,
-		Username: cfg.Kafka.Username,
-		Password: cfg.Kafka.Password,
-		TLS:      cfg.Kafka.TLS,
-		GroupID:  "transaction-service",
-		Topics: []string{
-			models.TopicTransferDebitSuccess,
-			models.TopicTransferDebitFailed,
-			models.TopicTransferCreditSuccess,
-			models.TopicTransferCreditFailed,
-			models.TopicTransferRefundSuccess,
-		},
-	}, producer, log)
-
-	// Create Transfer Consumer handler
-	transferConsumer := consumer.NewTransferConsumer(kafkaConsumer, producer, transferService, log)
-
-	// Start Kafka consumer in background
 	ctx, cancel := context.WithCancel(context.Background())
-	outboxPublisher := service.NewOutboxPublisher(transferRepo, producer, log)
-	go outboxPublisher.Start(ctx, time.Second)
-	go func() {
-		log.Info().Msg("Starting Transfer Consumer (Saga Observer)...")
-		if err := transferConsumer.Start(ctx); err != nil {
-			log.WithError(err).Error().Msg("Transfer consumer error")
-		}
-	}()
+	var kafkaConsumer *kafka.Consumer
+	if componentEnabled("RUN_SAGA_WORKERS") {
+		kafkaConsumer = kafka.NewConsumer(kafka.ConsumerConfig{
+			Brokers:  cfg.Kafka.Brokers,
+			Username: cfg.Kafka.Username,
+			Password: cfg.Kafka.Password,
+			TLS:      cfg.Kafka.TLS,
+			GroupID:  "transaction-service",
+			Topics: []string{
+				models.TopicTransferDebitSuccess,
+				models.TopicTransferDebitFailed,
+				models.TopicTransferCreditSuccess,
+				models.TopicTransferCreditFailed,
+				models.TopicTransferRefundSuccess,
+			},
+		}, producer, log)
 
-	// Start Timeout Worker in background
-	timeoutWorker := service.NewTimeoutWorker(transferRepo, transferService, producer, log)
-	go func() {
-		timeoutWorker.Start(ctx, 10*time.Second)
-	}()
+		transferConsumer := consumer.NewTransferConsumer(kafkaConsumer, producer, transferService, log)
+		outboxPublisher := service.NewOutboxPublisher(transferRepo, producer, log)
+		go outboxPublisher.Start(ctx, time.Second)
+		go func() {
+			log.Info().Msg("Starting Transfer Consumer (Saga Observer)...")
+			if err := transferConsumer.Start(ctx); err != nil {
+				log.WithError(err).Error().Msg("Transfer consumer error")
+			}
+		}()
 
-	// Start DLQ Worker in background
-	dlqWorker := service.NewDLQWorker(cfg.Kafka.Brokers, cfg.Kafka.GroupID, log)
-	go func() {
-		log.Info().Msg("Starting DLQ worker...")
-		dlqWorker.Run(ctx)
-	}()
+		timeoutWorker := service.NewTimeoutWorker(transferRepo, transferService, producer, log)
+		go timeoutWorker.Start(ctx, 10*time.Second)
+
+		dlqWorker := service.NewDLQWorker(cfg.Kafka.Brokers, cfg.Kafka.GroupID, log)
+		go func() {
+			log.Info().Msg("Starting DLQ worker...")
+			dlqWorker.Run(ctx)
+		}()
+	}
 
 	// Protected API routes (JWT auth)
 	api := router.Group("/api/v1")
@@ -200,7 +195,9 @@ func main() {
 		log.WithError(err).Error().Msg("Server shutdown error")
 	}
 
-	kafkaConsumer.Close()
+	if kafkaConsumer != nil {
+		_ = kafkaConsumer.Close()
+	}
 	log.Info().Msg("Transaction service stopped")
 }
 
@@ -233,4 +230,8 @@ func requestLogger(log *logger.Logger) gin.HandlerFunc {
 			WithDuration(time.Since(start)).
 			Info().Msg("HTTP request")
 	}
+}
+
+func componentEnabled(name string) bool {
+	return !strings.EqualFold(strings.TrimSpace(os.Getenv(name)), "false")
 }

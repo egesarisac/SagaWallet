@@ -1,45 +1,54 @@
 variable "gcp_project_id" {
-  description = "GCP project ID"
+  description = "GCP project that owns SagaWallet infrastructure."
   type        = string
 }
 
 variable "gcp_region" {
-  description = "GCP region for Cloud Run and Artifact Registry"
+  description = "Region for Cloud Run, GKE Autopilot, and Artifact Registry."
   type        = string
   default     = "us-central1"
 }
 
-variable "confluent_cloud_api_key" {
-  description = "Confluent Cloud API key"
-  type        = string
-  sensitive   = true
+variable "worker_subnet_cidr" {
+  type    = string
+  default = "10.20.0.0/20"
 }
 
-variable "confluent_cloud_api_secret" {
-  description = "Confluent Cloud API secret"
-  type        = string
-  sensitive   = true
+variable "pod_subnet_cidr" {
+  type    = string
+  default = "10.24.0.0/16"
 }
 
-variable "neon_project_id" {
-  description = "Neon Project ID (the slug from the dashboard URL)"
-  type        = string
+variable "service_subnet_cidr" {
+  type    = string
+  default = "10.25.0.0/20"
 }
 
-variable "neon_api_key" {
-  description = "Neon API key for serverless PostgreSQL"
-  type        = string
-  sensitive   = true
+variable "cloud_run_connector_cidr" {
+  type    = string
+  default = "10.8.0.0/28"
 }
 
-variable "jwt_secret" {
-  description = "JWT signing secret shared across services"
-  type        = string
-  sensitive   = true
-}
-
-variable "wallet_grpc_token" {
-  description = "Required internal service token for wallet<->transaction gRPC authentication"
-  type        = string
-  sensitive   = true
+variable "secret_names" {
+  description = "Existing Secret Manager secret IDs. Terraform never receives secret payloads."
+  type = object({
+    jwt_secret               = string
+    wallet_grpc_token        = string
+    wallet_database_url      = string
+    transaction_database_url = string
+    auth_database_url        = string
+    kafka_brokers            = string
+    kafka_username           = string
+    kafka_password           = string
+  })
+  default = {
+    jwt_secret               = "sagawallet-jwt"
+    wallet_grpc_token        = "sagawallet-wallet-grpc-token"
+    wallet_database_url      = "sagawallet-wallet-database-url"
+    transaction_database_url = "sagawallet-transaction-database-url"
+    auth_database_url        = "sagawallet-auth-database-url"
+    kafka_brokers            = "sagawallet-kafka-brokers"
+    kafka_username           = "sagawallet-kafka-username"
+    kafka_password           = "sagawallet-kafka-password"
+  }
 }

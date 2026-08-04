@@ -7,7 +7,7 @@
 ![Cloud](https://img.shields.io/badge/Cloud-GCP-blue?style=for-the-badge&logo=google-cloud)
 ![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
 
-**A production-ready distributed wallet system built with Go microservices, Saga Choreography, and deployed on GCP Cloud Run.**
+**A production-inspired distributed wallet system built with Go microservices, Kafka choreography, and an explicit at-least-once saga reliability model.**
 
 [Features](#-features) • [Quick Start](#-quick-start) • [API](#-api-endpoints) • [Architecture](#-architecture) • [Docker](#-docker-deployment)
 
@@ -27,7 +27,8 @@
 | 🚦 **Rate Limiting** | Token bucket algorithm (100 req/min per IP) |
 | 📊 **Prometheus Metrics** | Built-in `/metrics` endpoints for observability |
 | 📨 **Event-Driven** | Kafka (Redpanda) based async communication |
-| 💾 **ACID Transactions** | PostgreSQL with optimistic locking |
+| 💾 **Saga Reliability** | Transactional outbox, idempotent consumer inboxes, guarded transitions, DLQ, and replay tooling |
+| ☁️ **Deployment Topology** | Cloud Run public APIs with GKE Autopilot workers for Kafka and internal gRPC |
 
 ---
 
@@ -288,7 +289,8 @@ sagawallet/
 │   ├── middleware/         # JWT, Rate Limit, Metrics, Tracing
 │   └── models/             # Kafka event schemas
 ├── deployments/            # Infrastructure as Code
-│   └── terraform-gcp/      # GCP (Cloud Run, VPC, Cloud SQL)
+│   ├── kubernetes/         # GKE Autopilot worker definitions
+│   └── terraform-gcp/      # GCP Cloud Run, GKE, VPC, and Secret Manager references
 ├── services/
 │   ├── auth-service/       # Login, refresh token, OAuth scaffolding
 │   ├── wallet-service/     # Wallet management
@@ -316,6 +318,7 @@ sagawallet/
 | `make migrate-wallet` | Run wallet service migrations |
 | `make migrate-txn` | Run transaction service migrations |
 | `make test` | Run all unit tests |
+| `make ci` | Run formatting, lint, and race-detection checks |
 | `make test-integration` | Run full saga flow integration tests |
 
 ---
@@ -326,7 +329,7 @@ This repository uses a PR-first trunk-based workflow.
 
 1. Create a short-lived branch from `main`.
 2. Push the branch and open a Pull Request into `main`.
-3. CI runs on the PR (lint + tests).
+3. CI runs formatting, lint, race tests, integration, API contracts, and security checks.
 4. Merge only after review approval and passing checks.
 5. Merge to `main` triggers image build and deployment jobs.
 
@@ -364,7 +367,7 @@ For full contribution and branch protection guidance, see [CONTRIBUTING.md](CONT
 | Config | Viper |
 | Logging | Zerolog |
 | Observability | Prometheus + OpenTelemetry |
-| Cloud | GCP (Cloud Run) |
+| Cloud | GCP (Cloud Run APIs + GKE Autopilot workers) |
 
 ---
 

@@ -72,7 +72,6 @@ jobs:
           - auth-service
           - wallet-service
           - transaction-service
-          - notification-service
     steps:
       - id: auth
         uses: google-github-actions/auth@v2
@@ -94,5 +93,49 @@ jobs:
           image: ${{ steps.image.outputs.reference }}
           region: us-central1
       - name: Smoke test public API
-        if: matrix.service != 'notification-service'
         run: curl --fail --show-error --retry 6 --retry-all-errors --retry-delay 5 "${{ steps.deploy.outputs.url }}/health"
+
+  deploy-workers:
+    name: Deploy GKE workers
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: sagawallet-workers
+          location: us-central1
+      - name: Resolve worker image digests
+        env:
+          IMAGE_TAG: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          resolve_image() {
+            service="$1"
+            variable="$2"
+            image="${IMAGE_PREFIX}${service}:${IMAGE_TAG}"
+            digest="$(gcloud artifacts docker images describe "$image" --format='value(image_summary.digest)')"
+            test -n "$digest"
+            echo "${variable}=${IMAGE_PREFIX}${service}@${digest}" >> "$GITHUB_ENV"
+          }
+          resolve_image wallet-service WALLET_IMAGE
+          resolve_image transaction-service TRANSACTION_IMAGE
+          resolve_image notification-service NOTIFICATION_IMAGE
+      - name: Render and apply worker definitions
+        run: |
+          export WALLET_GRPC_ADDRESS="$(gcloud compute addresses describe sagawallet-wallet-grpc --region us-central1 --format='value(address)')"
+          export WORKER_GSA_EMAIL="sagawallet-runtime@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+          test -n "$WALLET_GRPC_ADDRESS"
+          envsubst < deployments/kubernetes/workers.yaml | kubectl apply -f -
+      - name: Wait for worker rollouts
+        run: |
+          kubectl rollout status deployment/wallet-worker --namespace saga-workers --timeout=180s
+          kubectl rollout status deployment/transaction-worker --namespace saga-workers --timeout=180s
+          kubectl rollout status deployment/notification-worker --namespace saga-workers --timeout=180s

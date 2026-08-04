@@ -1,5 +1,6 @@
 .terraform/
 .terraform.lock.hcl
+!deployments/terraform-gcp/.terraform.lock.hcl
 *.tfstate
 *.tfstate.backup
 *.tfvars

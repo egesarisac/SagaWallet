@@ -87,31 +87,30 @@ func main() {
 		DB: dbPool,
 	})
 
-	// Create Kafka consumer (raw)
-	kafkaConsumer := kafka.NewConsumer(kafka.ConsumerConfig{
-		Brokers:  cfg.Kafka.Brokers,
-		Username: cfg.Kafka.Username,
-		Password: cfg.Kafka.Password,
-		TLS:      cfg.Kafka.TLS,
-		GroupID:  "wallet-service",
-		Topics: []string{
-			models.TopicTransferCreated,
-			models.TopicTransferDebitSuccess,
-			models.TopicTransferCreditFailed,
-		},
-	}, producer, log)
-
-	// Create Wallet Consumer handler
-	walletConsumer := consumer.NewWalletConsumer(kafkaConsumer, producer, walletService, log)
-
-	// Start Kafka consumer in background
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		log.Info().Msg("Starting Wallet Consumer...")
-		if err := walletConsumer.Start(ctx); err != nil {
-			log.WithError(err).Error().Msg("Wallet consumer error")
-		}
-	}()
+	var kafkaConsumer *kafka.Consumer
+	if componentEnabled("RUN_KAFKA_CONSUMERS") {
+		kafkaConsumer = kafka.NewConsumer(kafka.ConsumerConfig{
+			Brokers:  cfg.Kafka.Brokers,
+			Username: cfg.Kafka.Username,
+			Password: cfg.Kafka.Password,
+			TLS:      cfg.Kafka.TLS,
+			GroupID:  "wallet-service",
+			Topics: []string{
+				models.TopicTransferCreated,
+				models.TopicTransferDebitSuccess,
+				models.TopicTransferCreditFailed,
+			},
+		}, producer, log)
+
+		walletConsumer := consumer.NewWalletConsumer(kafkaConsumer, producer, walletService, log)
+		go func() {
+			log.Info().Msg("Starting Wallet Consumer...")
+			if err := walletConsumer.Start(ctx); err != nil {
+				log.WithError(err).Error().Msg("Wallet consumer error")
+			}
+		}()
+	}
 
 	// Setup Gin router
 	if cfg.Log.Level != "debug" {
@@ -147,29 +146,31 @@ func main() {
 	}
 	walletHandler.RegisterRoutes(api)
 
-	// Start gRPC server
-	grpcAddr := fmt.Sprintf(":%d", cfg.GRPCPort)
-	grpcListener, err := net.Listen("tcp", grpcAddr)
-	if err != nil {
-		log.WithError(err).Fatal().Msg("Failed to listen for gRPC")
-	}
-
-	walletGrpcToken := os.Getenv("WALLET_GRPC_TOKEN")
-	if strings.TrimSpace(walletGrpcToken) == "" {
-		log.Fatal().Msg("WALLET_GRPC_TOKEN is required for wallet gRPC internal service authentication")
-	}
-
-	grpcServer := grpc.NewServer(
-		grpc.UnaryInterceptor(grpc_internal.ServiceAuthUnaryInterceptor(walletGrpcToken, log)),
-	)
-	pb.RegisterWalletServiceServer(grpcServer, grpc_internal.NewServer(walletService, log))
-
-	go func() {
-		log.Info().Str("addr", grpcAddr).Msg("gRPC server starting")
-		if err := grpcServer.Serve(grpcListener); err != nil {
-			log.WithError(err).Fatal().Msg("gRPC server error")
+	var grpcServer *grpc.Server
+	if componentEnabled("RUN_GRPC") {
+		grpcAddr := fmt.Sprintf(":%d", cfg.GRPCPort)
+		grpcListener, err := net.Listen("tcp", grpcAddr)
+		if err != nil {
+			log.WithError(err).Fatal().Msg("Failed to listen for gRPC")
 		}
-	}()
+
+		walletGrpcToken := os.Getenv("WALLET_GRPC_TOKEN")
+		if strings.TrimSpace(walletGrpcToken) == "" {
+			log.Fatal().Msg("WALLET_GRPC_TOKEN is required for wallet gRPC internal service authentication")
+		}
+
+		grpcServer = grpc.NewServer(
+			grpc.UnaryInterceptor(grpc_internal.ServiceAuthUnaryInterceptor(walletGrpcToken, log)),
+		)
+		pb.RegisterWalletServiceServer(grpcServer, grpc_internal.NewServer(walletService, log))
+
+		go func() {
+			log.Info().Str("addr", grpcAddr).Msg("gRPC server starting")
+			if err := grpcServer.Serve(grpcListener); err != nil {
+				log.WithError(err).Fatal().Msg("gRPC server error")
+			}
+		}()
+	}
 
 	// Start HTTP server
 	httpAddr := fmt.Sprintf(":%d", cfg.HTTPPort)
@@ -200,11 +201,18 @@ func main() {
 		log.WithError(err).Error().Msg("Server shutdown error")
 	}
 
-	log.Info().Msg("Stopping gRPC server...")
-	grpcServer.GracefulStop()
-
-	kafkaConsumer.Close()
+	if grpcServer != nil {
+		log.Info().Msg("Stopping gRPC server...")
+		grpcServer.GracefulStop()
+	}
+	if kafkaConsumer != nil {
+		_ = kafkaConsumer.Close()
+	}
 	log.Info().Msg("Wallet service stopped")
+}
+
+func componentEnabled(name string) bool {
+	return !strings.EqualFold(strings.TrimSpace(os.Getenv(name)), "false")
 }
 
 func connectDB(cfg *config.Config) (*pgxpool.Pool, error) {

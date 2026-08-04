@@ -1,0 +1,242 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: saga-workers
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: saga-worker
+  namespace: saga-workers
+  annotations:
+    iam.gke.io/gcp-service-account: ${WORKER_GSA_EMAIL}
+---
+apiVersion: secrets-store-gke.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: saga-worker-secrets
+  namespace: saga-workers
+spec:
+  parameters:
+    secrets: |
+      - resourceName: "projects/${GCP_PROJECT_ID}/secrets/sagawallet-jwt/versions/latest"
+        path: "jwt-secret"
+      - resourceName: "projects/${GCP_PROJECT_ID}/secrets/sagawallet-wallet-grpc-token/versions/latest"
+        path: "wallet-grpc-token"
+      - resourceName: "projects/${GCP_PROJECT_ID}/secrets/sagawallet-wallet-database-url/versions/latest"
+        path: "wallet-database-url"
+      - resourceName: "projects/${GCP_PROJECT_ID}/secrets/sagawallet-transaction-database-url/versions/latest"
+        path: "transaction-database-url"
+      - resourceName: "projects/${GCP_PROJECT_ID}/secrets/sagawallet-kafka-brokers/versions/latest"
+        path: "kafka-brokers"
+      - resourceName: "projects/${GCP_PROJECT_ID}/secrets/sagawallet-kafka-username/versions/latest"
+        path: "kafka-username"
+      - resourceName: "projects/${GCP_PROJECT_ID}/secrets/sagawallet-kafka-password/versions/latest"
+        path: "kafka-password"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wallet-worker
+  namespace: saga-workers
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wallet-worker
+  template:
+    metadata:
+      labels:
+        app: wallet-worker
+    spec:
+      serviceAccountName: saga-worker
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: wallet-worker
+          image: ${WALLET_IMAGE}
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: grpc
+              containerPort: 9081
+          env:
+            - name: RUN_KAFKA_CONSUMERS
+              value: "true"
+            - name: RUN_GRPC
+              value: "true"
+            - name: KAFKA_TLS
+              value: "true"
+            - name: DATABASE_URL_FILE
+              value: /var/run/secrets/wallet-database-url
+            - name: JWT_SECRET_FILE
+              value: /var/run/secrets/jwt-secret
+            - name: WALLET_GRPC_TOKEN_FILE
+              value: /var/run/secrets/wallet-grpc-token
+            - name: KAFKA_BROKERS_FILE
+              value: /var/run/secrets/kafka-brokers
+            - name: KAFKA_USERNAME_FILE
+              value: /var/run/secrets/kafka-username
+            - name: KAFKA_PASSWORD_FILE
+              value: /var/run/secrets/kafka-password
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+          volumeMounts:
+            - name: secrets
+              mountPath: /var/run/secrets
+              readOnly: true
+      volumes:
+        - name: secrets
+          csi:
+            driver: secrets-store-gke.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: saga-worker-secrets
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wallet-grpc
+  namespace: saga-workers
+  annotations:
+    networking.gke.io/load-balancer-type: "Internal"
+spec:
+  type: LoadBalancer
+  loadBalancerIP: ${WALLET_GRPC_ADDRESS}
+  selector:
+    app: wallet-worker
+  ports:
+    - name: grpc
+      port: 9081
+      targetPort: grpc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transaction-worker
+  namespace: saga-workers
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: transaction-worker
+  template:
+    metadata:
+      labels:
+        app: transaction-worker
+    spec:
+      serviceAccountName: saga-worker
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: transaction-worker
+          image: ${TRANSACTION_IMAGE}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: RUN_SAGA_WORKERS
+              value: "true"
+            - name: WALLET_GRPC_ADDR
+              value: "${WALLET_GRPC_ADDRESS}:9081"
+            - name: KAFKA_TLS
+              value: "true"
+            - name: DATABASE_URL_FILE
+              value: /var/run/secrets/transaction-database-url
+            - name: JWT_SECRET_FILE
+              value: /var/run/secrets/jwt-secret
+            - name: WALLET_GRPC_TOKEN_FILE
+              value: /var/run/secrets/wallet-grpc-token
+            - name: KAFKA_BROKERS_FILE
+              value: /var/run/secrets/kafka-brokers
+            - name: KAFKA_USERNAME_FILE
+              value: /var/run/secrets/kafka-username
+            - name: KAFKA_PASSWORD_FILE
+              value: /var/run/secrets/kafka-password
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+          volumeMounts:
+            - name: secrets
+              mountPath: /var/run/secrets
+              readOnly: true
+      volumes:
+        - name: secrets
+          csi:
+            driver: secrets-store-gke.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: saga-worker-secrets
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-worker
+  namespace: saga-workers
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notification-worker
+  template:
+    metadata:
+      labels:
+        app: notification-worker
+    spec:
+      serviceAccountName: saga-worker
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: notification-worker
+          image: ${NOTIFICATION_IMAGE}
+          ports:
+            - name: http
+              containerPort: 8084
+          env:
+            - name: KAFKA_TLS
+              value: "true"
+            - name: KAFKA_BROKERS_FILE
+              value: /var/run/secrets/kafka-brokers
+            - name: KAFKA_USERNAME_FILE
+              value: /var/run/secrets/kafka-username
+            - name: KAFKA_PASSWORD_FILE
+              value: /var/run/secrets/kafka-password
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+          volumeMounts:
+            - name: secrets
+              mountPath: /var/run/secrets
+              readOnly: true
+      volumes:
+        - name: secrets
+          csi:
+            driver: secrets-store-gke.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: saga-worker-secrets

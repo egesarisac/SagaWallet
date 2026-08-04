@@ -1,5 +1,5 @@
 import http from 'k6/http';
-import { check, sleep } from 'k6';
+import { check } from 'k6';
 import { uuidv4 } from 'https://jslib.k6.io/k6-utils/1.4.0/index.js';
 
 export const options = {
@@ -16,61 +16,79 @@ export const options = {
 
 const WALLET_SERVICE_URL = __ENV.WALLET_SERVICE_URL || 'http://localhost:8081';
 const TRANSACTION_SERVICE_URL = __ENV.TRANSACTION_SERVICE_URL || 'http://localhost:8083';
+const AUTH_SERVICE_URL = __ENV.AUTH_SERVICE_URL || 'http://localhost:8085';
 const JWT_TOKEN = __ENV.JWT_TOKEN || '';
 
-const params = {
-    headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${JWT_TOKEN}`
-    },
-};
+function params(token) {
+    return {
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+        },
+    };
+}
+
+function registerFixtureUser() {
+    const res = http.post(`${AUTH_SERVICE_URL}/api/v1/auth/register`, JSON.stringify({
+        email: `k6-${uuidv4()}@example.test`,
+        password: 'k6-integration-password',
+    }), {
+        headers: { 'Content-Type': 'application/json' },
+    });
+    check(res, { 'fixture user registered': (r) => r.status === 201 });
+    return res.status === 201 ? res.json('data.access_token') : '';
+}
 
 export function setup() {
-    if (!JWT_TOKEN) {
-        console.error("JWT_TOKEN is required. Run with -e JWT_TOKEN=...");
+    const token = JWT_TOKEN || registerFixtureUser();
+    if (!token) {
+        throw new Error('unable to obtain a fixture JWT from auth-service');
     }
+    const authenticatedParams = params(token);
 
-    // Create Sender Wallet
     let res = http.post(`${WALLET_SERVICE_URL}/api/v1/wallets`, JSON.stringify({
-        user_id: uuidv4(),
-        currency: 'TRY'
-    }), params);
+        currency: 'TRY',
+    }), authenticatedParams);
 
     check(res, { 'sender wallet created': (r) => r.status === 201 });
+    if (res.status !== 201) {
+        throw new Error(`could not create sender wallet: ${res.status}`);
+    }
     const senderId = res.json('data.id');
 
-    // Credit Sender Wallet with lots of money
     res = http.post(`${WALLET_SERVICE_URL}/api/v1/wallets/${senderId}/credit`, JSON.stringify({
-        amount: "1000000.00",
+        amount: '1000000.00',
         reference_id: uuidv4(),
-        description: "Initial load test balance"
-    }), params);
+        description: 'Initial load test balance',
+    }), authenticatedParams);
     check(res, { 'sender wallet credited': (r) => r.status === 200 });
+    if (res.status !== 200) {
+        throw new Error(`could not credit sender wallet: ${res.status}`);
+    }
 
-    // Create Receiver Wallet
     res = http.post(`${WALLET_SERVICE_URL}/api/v1/wallets`, JSON.stringify({
-        user_id: uuidv4(),
-        currency: 'TRY'
-    }), params);
+        currency: 'TRY',
+    }), authenticatedParams);
     check(res, { 'receiver wallet created': (r) => r.status === 201 });
+    if (res.status !== 201) {
+        throw new Error(`could not create receiver wallet: ${res.status}`);
+    }
     const receiverId = res.json('data.id');
 
-    return { senderId, receiverId };
+    return { senderId, receiverId, token };
 }
 
 export default function (data) {
-    // Initiate Transfer
     const payload = JSON.stringify({
         sender_wallet_id: data.senderId,
         receiver_wallet_id: data.receiverId,
-        amount: "1.00"
+        amount: '1.00',
     });
 
-    const res = http.post(`${TRANSACTION_SERVICE_URL}/api/v1/transfers`, payload, params);
+    const res = http.post(`${TRANSACTION_SERVICE_URL}/api/v1/transfers`, payload, params(data.token));
 
     check(res, {
         'transfer accepted': (r) => r.status === 202,
-        'transfer id returned': (r) => r.json('data.transfer_id') !== undefined,
+        'transfer id returned': (r) => r.status === 202 && r.json('data.transfer_id') !== undefined,
     });
-
 }

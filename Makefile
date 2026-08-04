@@ -1,4 +1,4 @@
-.PHONY: help proto migrate test run-wallet run-transaction run-notification docker-up docker-down lint
+.PHONY: help proto migrate test test-unit test-integration run-wallet run-transaction run-notification docker-up docker-down lint
 
 # Default target
 help:
@@ -9,7 +9,7 @@ help:
 	@echo "  make migrate-wallet     Run wallet service migrations"
 	@echo "  make migrate-txn        Run transaction service migrations"
 	@echo "  make test               Run all unit tests"
-	@echo "  make test-integration   Run integration tests (requires running services)"
+	@echo "  make test-integration   Run integration tests against the full local stack"
 	@echo "  make lint               Run linter"
 	@echo "  make run-wallet         Run wallet service"
 	@echo "  make run-auth           Run auth service"
@@ -57,21 +57,17 @@ migrate-txn-down:
 
 test:
 	@echo "Running all unit tests..."
-	@cd pkg/middleware && go test ./... -v -cover
+	@cd pkg && go test ./... -v -cover
 	@cd services/auth-service && go test ./... -v -cover
 	@cd services/wallet-service && go test ./... -v -cover
 	@cd services/transaction-service && go test ./... -v -cover
+	@cd services/notification-service && go test ./... -v -cover
 
-test-unit:
-	@echo "Running unit tests..."
-	@cd pkg/middleware && go test ./... -v -cover
-	@cd services/auth-service && go test ./... -v -cover
-	@cd services/wallet-service && go test ./... -v -cover
-	@cd services/transaction-service && go test ./... -v -cover
+test-unit: test
 
 test-integration:
-	@echo "Running integration tests (requires running services)..."
-	@cd tests/integration && GOWORK=off go mod tidy && JWT_TOKEN=$$(cd ../../tools/tokengen && GOWORK=off JWT_SECRET=dev-local-jwt-secret-change-me go run main.go | tail -1) GOWORK=off go test -v
+	@echo "Running integration tests against the configured services..."
+	@cd tests/integration && RUN_INTEGRATION=1 GOWORK=off go test -count=1 -timeout 2m -v
 
 test-wallet:
 	@echo "Running wallet service tests..."

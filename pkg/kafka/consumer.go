@@ -21,10 +21,20 @@ type MessageHandler func(ctx context.Context, event *models.Event) error
 
 // Consumer wraps kafka-go reader with retry and DLQ support.
 type Consumer struct {
-	reader   *kafka.Reader
-	producer *Producer // For DLQ publishing
+	reader   messageReader
+	producer eventPublisher // For retry and DLQ publishing
 	log      *logger.Logger
 	cfg      ConsumerConfig
+}
+
+type messageReader interface {
+	FetchMessage(context.Context) (kafka.Message, error)
+	CommitMessages(context.Context, ...kafka.Message) error
+	Close() error
+}
+
+type eventPublisher interface {
+	Publish(context.Context, string, *models.Event) error
 }
 
 // ConsumerConfig holds consumer configuration.
@@ -128,8 +138,10 @@ func (c *Consumer) processMessage(ctx context.Context, msg kafka.Message, handle
 		c.log.WithError(err).
 			WithField("topic", msg.Topic).
 			Error().Msg("Failed to unmarshal event")
-		c.sendToDLQ(ctx, msg.Topic, nil, err)
-		_ = c.reader.CommitMessages(ctx, msg)
+		if err := c.sendToDLQ(ctx, msg, nil, "invalid_event", err); err != nil {
+			return
+		}
+		_ = c.commit(ctx, msg, c.log)
 		return
 	}
 
@@ -151,49 +163,106 @@ func (c *Consumer) processMessage(ctx context.Context, msg kafka.Message, handle
 		event.Metadata.RetryCount++
 		if event.Metadata.RetryCount >= c.cfg.MaxRetries {
 			logCtx.Warn().Msg("Max retries exceeded, sending to DLQ")
-			c.sendToDLQ(ctx, msg.Topic, &event, err)
+			if err := c.sendToDLQ(ctx, msg, &event, "handler_error", err); err != nil {
+				return
+			}
 		} else {
-			// Re-publish for retry (in real implementation, use a delay queue)
-			logCtx.Info().
+			delay := c.retryDelay(event.Metadata.RetryCount)
+			logCtx.WithField("delay", delay.String()).Info().
 				Int("retry_count", event.Metadata.RetryCount).
 				Msg("Retrying event")
+			if !waitForRetry(ctx, delay) {
+				return
+			}
+			if err := c.producer.Publish(ctx, msg.Topic, &event); err != nil {
+				logCtx.WithError(err).Error().Msg("Failed to persist retry event")
+				return
+			}
 		}
 	} else {
 		logCtx.WithDuration(duration).Info().Msg("Event processed successfully")
 	}
 
 	// Commit the message
-	if err := c.reader.CommitMessages(ctx, msg); err != nil {
-		logCtx.WithError(err).Error().Msg("Failed to commit message")
-	}
+	_ = c.commit(ctx, msg, logCtx)
 }
 
 // sendToDLQ publishes a failed event to the dead letter queue.
-func (c *Consumer) sendToDLQ(ctx context.Context, originalTopic string, event *models.Event, processErr error) {
+func (c *Consumer) sendToDLQ(ctx context.Context, msg kafka.Message, event *models.Event, failureClass string, processErr error) error {
+	headers := make(map[string]string, len(msg.Headers))
+	for _, header := range msg.Headers {
+		headers[header.Key] = string(header.Value)
+	}
 	dlqPayload := models.DLQPayload{
-		OriginalTopic: originalTopic,
-		OriginalEvent: event,
-		Error:         processErr.Error(),
-		FailedAt:      time.Now().UTC(),
-		RetryCount:    0,
+		OriginalTopic:     msg.Topic,
+		OriginalEvent:     event,
+		OriginalValue:     msg.Value,
+		OriginalPartition: msg.Partition,
+		OriginalOffset:    msg.Offset,
+		Headers:           headers,
+		FailureClass:      failureClass,
+		Error:             processErr.Error(),
+		FailedAt:          time.Now().UTC(),
+		RetryCount:        0,
 	}
 
 	if event != nil {
 		dlqPayload.RetryCount = event.Metadata.RetryCount
 	}
 
-	payload := map[string]interface{}{
-		"original_topic": dlqPayload.OriginalTopic,
-		"error":          dlqPayload.Error,
-		"failed_at":      dlqPayload.FailedAt,
-		"retry_count":    dlqPayload.RetryCount,
+	payloadBytes, err := json.Marshal(dlqPayload)
+	if err != nil {
+		return err
+	}
+	payload := make(map[string]interface{})
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return err
 	}
 
 	dlqEvent := models.NewEvent("dlq.entry", "", "kafka-consumer", payload)
 
 	if err := c.producer.Publish(ctx, models.TopicTransferDLQ, dlqEvent); err != nil {
 		c.log.WithError(err).Error().Msg("Failed to send to DLQ")
+		return err
 	}
+	return nil
+}
+
+func (c *Consumer) retryDelay(retryCount int) time.Duration {
+	if retryCount <= 0 || len(c.cfg.RetryIntervals) == 0 {
+		return 0
+	}
+	index := retryCount - 1
+	if index < len(c.cfg.RetryIntervals) {
+		return c.cfg.RetryIntervals[index]
+	}
+	return c.cfg.RetryIntervals[len(c.cfg.RetryIntervals)-1]
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) bool {
+	if delay == 0 {
+		return true
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+type commitLogger interface {
+	WithError(error) *logger.Logger
+}
+
+func (c *Consumer) commit(ctx context.Context, msg kafka.Message, logCtx commitLogger) error {
+	if err := c.reader.CommitMessages(ctx, msg); err != nil {
+		logCtx.WithError(err).Error().Msg("Failed to commit message")
+		return err
+	}
+	return nil
 }
 
 // Close closes the consumer.

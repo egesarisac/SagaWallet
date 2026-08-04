@@ -135,9 +135,14 @@ type TransferFailedPayload struct {
 
 // DLQPayload wraps a failed event for the dead letter queue.
 type DLQPayload struct {
-	OriginalTopic string    `json:"original_topic"`
-	OriginalEvent *Event    `json:"original_event"`
-	Error         string    `json:"error"`
-	FailedAt      time.Time `json:"failed_at"`
-	RetryCount    int       `json:"retry_count"`
+	OriginalTopic     string            `json:"original_topic"`
+	OriginalEvent     *Event            `json:"original_event,omitempty"`
+	OriginalValue     []byte            `json:"original_value,omitempty"`
+	OriginalPartition int               `json:"original_partition"`
+	OriginalOffset    int64             `json:"original_offset"`
+	Headers           map[string]string `json:"headers,omitempty"`
+	FailureClass      string            `json:"failure_class"`
+	Error             string            `json:"error"`
+	FailedAt          time.Time         `json:"failed_at"`
+	RetryCount        int               `json:"retry_count"`
 }

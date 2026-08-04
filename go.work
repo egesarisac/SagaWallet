@@ -11,4 +11,5 @@ use (
 	./services/wallet-service
 	./tests/integration
 	./tools/tokengen
+	./tools/eventreplay
 )

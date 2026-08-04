@@ -284,7 +284,29 @@ func (r *TransferRepository) TransitionStatus(ctx context.Context, transferID uu
 		return false, apperrors.New(apperrors.CodeValidationFailed, fmt.Sprintf("invalid transfer transition %s -> %s", expectedStatus, status))
 	}
 
-	command, err := r.pool.Exec(ctx, `
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to begin transition transaction", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var recorded pgtype.UUID
+	err = tx.QueryRow(ctx, `
+		INSERT INTO processed_events (event_id, topic)
+		VALUES ($1, 'transfer-saga')
+		ON CONFLICT (event_id) DO NOTHING
+		RETURNING event_id`, uuidToPgtype(eventID)).Scan(&recorded)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if err := tx.Commit(ctx); err != nil {
+			return false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to commit duplicate event", err)
+		}
+		return false, nil
+	}
+	if err != nil {
+		return false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to record processed event", err)
+	}
+
+	command, err := tx.Exec(ctx, `
 		UPDATE transfers
 		SET status = $3, failure_reason = NULLIF($4, ''), last_event_id = $5, updated_at = NOW()
 		WHERE id = $1 AND status = $2`, uuidToPgtype(transferID), expectedStatus, status, failureReason, uuidToPgtype(eventID))
@@ -292,15 +314,21 @@ func (r *TransferRepository) TransitionStatus(ctx context.Context, transferID uu
 		return false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to transition transfer", err)
 	}
 	if command.RowsAffected() == 1 {
+		if err := tx.Commit(ctx); err != nil {
+			return false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to commit transfer transition", err)
+		}
 		return true, nil
 	}
 
 	var exists bool
-	if err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfers WHERE id = $1)`, uuidToPgtype(transferID)).Scan(&exists); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfers WHERE id = $1)`, uuidToPgtype(transferID)).Scan(&exists); err != nil {
 		return false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to verify transfer", err)
 	}
 	if !exists {
 		return false, apperrors.TransferNotFound(transferID.String())
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to commit ignored transition", err)
 	}
 	return false, nil
 }

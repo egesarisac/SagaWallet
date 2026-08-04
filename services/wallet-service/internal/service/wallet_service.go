@@ -103,53 +103,8 @@ type CreditInput struct {
 
 // Credit adds funds to a wallet with audit trail.
 func (s *WalletService) Credit(ctx context.Context, input CreditInput) (*db.Wallet, error) {
-	// Validate amount
-	if input.Amount == "" || input.Amount == "0" || input.Amount == "0.00" {
-		return nil, apperrors.InvalidAmount(input.Amount)
-	}
-
-	// Get current wallet for optimistic lock
-	wallet, err := s.repo.GetWalletByID(ctx, input.WalletID)
-	if err != nil {
-		return nil, err
-	}
-
-	if wallet.Status != "ACTIVE" {
-		return nil, apperrors.WalletFrozen(input.WalletID.String())
-	}
-
-	// Credit with optimistic locking
-	updatedWallet, err := s.repo.CreditWallet(ctx, input.WalletID, input.Amount, wallet.Version)
-	if err != nil {
-		s.log.WithWalletID(input.WalletID.String()).
-			WithAmount(input.Amount).
-			WithError(err).
-			Error().Msg("Failed to credit wallet")
-		return nil, err
-	}
-
-	// Create audit trail
-	_, auditErr := s.repo.CreateWalletTransaction(
-		ctx,
-		input.WalletID,
-		input.Amount,
-		"CREDIT",
-		input.ReferenceID,
-		input.Description,
-		numericToString(updatedWallet.Balance),
-	)
-	if auditErr != nil {
-		s.log.WithWalletID(input.WalletID.String()).
-			WithError(auditErr).
-			Warn().Msg("Failed to create audit trail for credit")
-	}
-
-	s.log.WithWalletID(input.WalletID.String()).
-		WithAmount(input.Amount).
-		WithField("new_balance", numericToString(updatedWallet.Balance)).
-		Info().Msg("Wallet credited")
-
-	return updatedWallet, nil
+	wallet, _, err := s.applyCredit(ctx, uuid.Nil, "", input)
+	return wallet, err
 }
 
 // DebitInput is the input for debiting a wallet.
@@ -162,53 +117,42 @@ type DebitInput struct {
 
 // Debit removes funds from a wallet with balance validation and audit trail.
 func (s *WalletService) Debit(ctx context.Context, input DebitInput) (*db.Wallet, error) {
-	// Validate amount
+	wallet, _, err := s.applyDebit(ctx, uuid.Nil, "", input)
+	return wallet, err
+}
+
+// CreditForEvent applies a consumer side effect once for the supplied event ID.
+func (s *WalletService) CreditForEvent(ctx context.Context, eventID uuid.UUID, topic string, input CreditInput) (*db.Wallet, bool, error) {
+	return s.applyCredit(ctx, eventID, topic, input)
+}
+
+// DebitForEvent applies a consumer side effect once for the supplied event ID.
+func (s *WalletService) DebitForEvent(ctx context.Context, eventID uuid.UUID, topic string, input DebitInput) (*db.Wallet, bool, error) {
+	return s.applyDebit(ctx, eventID, topic, input)
+}
+
+func (s *WalletService) applyCredit(ctx context.Context, eventID uuid.UUID, topic string, input CreditInput) (*db.Wallet, bool, error) {
 	if input.Amount == "" || input.Amount == "0" || input.Amount == "0.00" {
-		return nil, apperrors.InvalidAmount(input.Amount)
+		return nil, false, apperrors.InvalidAmount(input.Amount)
 	}
-
-	// Get current wallet for optimistic lock
-	wallet, err := s.repo.GetWalletByID(ctx, input.WalletID)
+	wallet, duplicate, err := s.repo.ApplyBalanceChange(ctx, eventID, topic, input.WalletID, input.Amount, "CREDIT", input.ReferenceID, input.Description)
 	if err != nil {
-		return nil, err
+		s.log.WithWalletID(input.WalletID.String()).WithAmount(input.Amount).WithError(err).Error().Msg("Failed to credit wallet")
+		return nil, false, err
 	}
+	return wallet, duplicate, nil
+}
 
-	if wallet.Status != "ACTIVE" {
-		return nil, apperrors.WalletFrozen(input.WalletID.String())
+func (s *WalletService) applyDebit(ctx context.Context, eventID uuid.UUID, topic string, input DebitInput) (*db.Wallet, bool, error) {
+	if input.Amount == "" || input.Amount == "0" || input.Amount == "0.00" {
+		return nil, false, apperrors.InvalidAmount(input.Amount)
 	}
-
-	// Debit with optimistic locking and balance check
-	updatedWallet, err := s.repo.DebitWallet(ctx, input.WalletID, input.Amount, wallet.Version)
+	wallet, duplicate, err := s.repo.ApplyBalanceChange(ctx, eventID, topic, input.WalletID, input.Amount, "DEBIT", input.ReferenceID, input.Description)
 	if err != nil {
-		s.log.WithWalletID(input.WalletID.String()).
-			WithAmount(input.Amount).
-			WithError(err).
-			Error().Msg("Failed to debit wallet")
-		return nil, err
+		s.log.WithWalletID(input.WalletID.String()).WithAmount(input.Amount).WithError(err).Error().Msg("Failed to debit wallet")
+		return nil, false, err
 	}
-
-	// Create audit trail
-	_, auditErr := s.repo.CreateWalletTransaction(
-		ctx,
-		input.WalletID,
-		input.Amount,
-		"DEBIT",
-		input.ReferenceID,
-		input.Description,
-		numericToString(updatedWallet.Balance),
-	)
-	if auditErr != nil {
-		s.log.WithWalletID(input.WalletID.String()).
-			WithError(auditErr).
-			Warn().Msg("Failed to create audit trail for debit")
-	}
-
-	s.log.WithWalletID(input.WalletID.String()).
-		WithAmount(input.Amount).
-		WithField("new_balance", numericToString(updatedWallet.Balance)).
-		Info().Msg("Wallet debited")
-
-	return updatedWallet, nil
+	return wallet, duplicate, nil
 }
 
 // GetTransactions retrieves paginated transactions for a wallet.

@@ -150,6 +150,110 @@ func (r *WalletRepository) DebitWallet(ctx context.Context, walletID uuid.UUID, 
 	return &wallet, nil
 }
 
+// ApplyBalanceChange atomically mutates a balance and records its immutable ledger entry.
+// When eventID is supplied, the inbox row and ledger mutation share the same transaction.
+func (r *WalletRepository) ApplyBalanceChange(
+	ctx context.Context,
+	eventID uuid.UUID,
+	topic string,
+	walletID uuid.UUID,
+	amount string,
+	txType string,
+	referenceID uuid.UUID,
+	description string,
+) (*db.Wallet, bool, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to begin wallet transaction", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if eventID != uuid.Nil {
+		var accepted uuid.UUID
+		err := tx.QueryRow(ctx, `
+			INSERT INTO processed_events (event_id, topic)
+			VALUES ($1, $2)
+			ON CONFLICT (event_id) DO NOTHING
+			RETURNING event_id`, uuidToPgtype(eventID), topic).Scan(&accepted)
+		if errors.Is(err, pgx.ErrNoRows) {
+			wallet, getErr := getWalletForUpdate(ctx, tx, walletID)
+			if getErr != nil {
+				return nil, false, getErr
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return nil, false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to commit duplicate event", err)
+			}
+			return wallet, true, nil
+		}
+		if err != nil {
+			return nil, false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to record processed event", err)
+		}
+	}
+
+	wallet, err := getWalletForUpdate(ctx, tx, walletID)
+	if err != nil {
+		return nil, false, err
+	}
+	if wallet.Status != "ACTIVE" {
+		return nil, false, apperrors.WalletFrozen(walletID.String())
+	}
+
+	operator := "+"
+	if txType == "DEBIT" {
+		operator = "-"
+	}
+	query := `UPDATE wallets SET balance = balance ` + operator + ` $2, version = version + 1, updated_at = NOW() WHERE id = $1`
+	if txType == "DEBIT" {
+		query += ` AND balance >= $2`
+	}
+	query += ` RETURNING id, user_id, balance, currency, status, version, created_at, updated_at`
+	updated, err := scanWallet(tx.QueryRow(ctx, query, uuidToPgtype(walletID), stringToNumeric(amount)))
+	if errors.Is(err, pgx.ErrNoRows) && txType == "DEBIT" {
+		return nil, false, apperrors.InsufficientFunds(walletID.String(), amount, numericToString(wallet.Balance))
+	}
+	if err != nil {
+		return nil, false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to update wallet balance", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO wallet_transactions (wallet_id, amount, type, reference_id, description, balance_after)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		uuidToPgtype(walletID), stringToNumeric(amount), txType, uuidToPgtype(referenceID), description, updated.Balance); err != nil {
+		return nil, false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to create wallet ledger entry", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to commit wallet transaction", err)
+	}
+	return updated, false, nil
+}
+
+type walletRow interface {
+	Scan(dest ...any) error
+}
+
+func getWalletForUpdate(ctx context.Context, tx pgx.Tx, walletID uuid.UUID) (*db.Wallet, error) {
+	wallet, err := scanWallet(tx.QueryRow(ctx, `
+		SELECT id, user_id, balance, currency, status, version, created_at, updated_at
+		FROM wallets WHERE id = $1 FOR UPDATE`, uuidToPgtype(walletID)))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperrors.WalletNotFound(walletID.String())
+	}
+	if err != nil {
+		return nil, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to lock wallet", err)
+	}
+	return wallet, nil
+}
+
+func scanWallet(row walletRow) (*db.Wallet, error) {
+	var wallet db.Wallet
+	err := row.Scan(&wallet.ID, &wallet.UserID, &wallet.Balance, &wallet.Currency, &wallet.Status, &wallet.Version, &wallet.CreatedAt, &wallet.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &wallet, nil
+}
+
 // UpdateWalletStatus updates the status of a wallet.
 func (r *WalletRepository) UpdateWalletStatus(ctx context.Context, walletID uuid.UUID, status string) (*db.Wallet, error) {
 	wallet, err := r.queries.UpdateWalletStatus(ctx, db.UpdateWalletStatusParams{

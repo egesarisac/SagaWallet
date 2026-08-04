@@ -64,22 +64,30 @@ func (c *WalletConsumer) Start(ctx context.Context) error {
 // handleTransferCreated handles the start of a transfer saga (Debit Sender).
 func (c *WalletConsumer) handleTransferCreated(ctx context.Context, event *models.Event) error {
 	middleware.RecordKafkaEvent(models.TopicTransferCreated, "received")
-	payloadBytes, _ := json.Marshal(event.Payload)
+	payloadBytes, err := json.Marshal(event.Payload)
+	if err != nil {
+		return err
+	}
 	var payload models.TransferCreatedPayload
 	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
 		return err
 	}
 
-	senderID, _ := uuid.Parse(payload.SenderWalletID)
-	transferID, _ := uuid.Parse(payload.TransferID)
+	eventID, senderID, transferID, err := sagaIDs(event, payload.SenderWalletID, payload.TransferID)
+	if err != nil {
+		return err
+	}
 
 	// Call service to debit wallet
-	_, err := c.svc.Debit(ctx, service.DebitInput{
+	_, duplicate, err := c.svc.DebitForEvent(ctx, eventID, event.EventType, service.DebitInput{
 		WalletID:    senderID,
 		Amount:      payload.Amount,
 		ReferenceID: transferID,
 		Description: "Transfer Debit",
 	})
+	if duplicate {
+		return nil
+	}
 
 	if err != nil {
 		// Publish Failure Event
@@ -118,7 +126,10 @@ func (c *WalletConsumer) handleDebitSuccess(ctx context.Context, event *models.E
 	middleware.RecordKafkaEvent(models.TopicTransferDebitSuccess, "received")
 	// In choreography, Wallet Service listens to its own DebitSuccess (or assumes it) to trigger Credit.
 
-	payloadBytes, _ := json.Marshal(event.Payload)
+	payloadBytes, err := json.Marshal(event.Payload)
+	if err != nil {
+		return err
+	}
 	var payload models.DebitResultPayload
 	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
 		return err
@@ -128,16 +139,21 @@ func (c *WalletConsumer) handleDebitSuccess(ctx context.Context, event *models.E
 		return nil
 	}
 
-	receiverID, _ := uuid.Parse(payload.ReceiverWalletID)
-	transferID, _ := uuid.Parse(payload.TransferID)
+	eventID, receiverID, transferID, err := sagaIDs(event, payload.ReceiverWalletID, payload.TransferID)
+	if err != nil {
+		return err
+	}
 
 	// Call service to credit wallet
-	_, err := c.svc.Credit(ctx, service.CreditInput{
+	_, duplicate, err := c.svc.CreditForEvent(ctx, eventID, event.EventType, service.CreditInput{
 		WalletID:    receiverID,
 		Amount:      payload.Amount,
 		ReferenceID: transferID,
 		Description: "Transfer Credit",
 	})
+	if duplicate {
+		return nil
+	}
 
 	if err != nil {
 		// Publish Credit Failure Event -> Triggers Refund
@@ -174,22 +190,30 @@ func (c *WalletConsumer) handleDebitSuccess(ctx context.Context, event *models.E
 // handleCreditFailed handles triggering the refund step after a failed credit.
 func (c *WalletConsumer) handleCreditFailed(ctx context.Context, event *models.Event) error {
 	middleware.RecordKafkaEvent(models.TopicTransferCreditFailed, "received")
-	payloadBytes, _ := json.Marshal(event.Payload)
+	payloadBytes, err := json.Marshal(event.Payload)
+	if err != nil {
+		return err
+	}
 	var payload models.CreditResultPayload
 	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
 		return err
 	}
 
-	senderID, _ := uuid.Parse(payload.SenderWalletID)
-	transferID, _ := uuid.Parse(payload.TransferID)
+	eventID, senderID, transferID, err := sagaIDs(event, payload.SenderWalletID, payload.TransferID)
+	if err != nil {
+		return err
+	}
 
 	// Call service to refund sender
-	_, err := c.svc.Credit(ctx, service.CreditInput{
+	_, duplicate, err := c.svc.CreditForEvent(ctx, eventID, event.EventType, service.CreditInput{
 		WalletID:    senderID,
 		Amount:      payload.Amount,
 		ReferenceID: transferID,
 		Description: "Transfer Refund",
 	})
+	if duplicate {
+		return nil
+	}
 
 	if err != nil {
 		c.log.WithError(err).Error().Msg("CRITICAL: Failed to refund sender")
@@ -207,4 +231,20 @@ func (c *WalletConsumer) handleCreditFailed(ctx context.Context, event *models.E
 
 	successEvent := models.NewEvent(models.TopicTransferRefundSuccess, event.CorrelationID, "wallet-service", successPayloadMap)
 	return c.producer.Publish(ctx, models.TopicTransferRefundSuccess, successEvent)
+}
+
+func sagaIDs(event *models.Event, walletID, transferID string) (uuid.UUID, uuid.UUID, uuid.UUID, error) {
+	eventUUID, err := uuid.Parse(event.EventID)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, uuid.Nil, err
+	}
+	walletUUID, err := uuid.Parse(walletID)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, uuid.Nil, err
+	}
+	transferUUID, err := uuid.Parse(transferID)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, uuid.Nil, err
+	}
+	return eventUUID, walletUUID, transferUUID, nil
 }

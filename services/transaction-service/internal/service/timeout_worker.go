@@ -79,24 +79,24 @@ func (w *TimeoutWorker) processTimeouts(ctx context.Context) {
 		case string(models.TransferStatusPending):
 			// PENDING -> FAILED
 			reason := "Saga timeout: no response after transfer.created"
-			err := w.svc.UpdateStatus(ctx, transferID, string(models.TransferStatusFailed), reason)
-			if err == nil {
+			changed, err := w.svc.TransitionStatus(ctx, transferID, string(models.TransferStatusPending), string(models.TransferStatusFailed), reason, uuid.NewString())
+			if err == nil && changed {
 				w.publishTransferFailed(ctx, transferID.String(), w.uuidFromPgtype(t.SenderWalletID), reason)
 			}
 
 		case string(models.TransferStatusDebited):
 			// DEBITED -> REFUNDING
 			reason := "Saga timeout: no response after transfer.debit.success"
-			err := w.svc.UpdateStatus(ctx, transferID, string(models.TransferStatusRefunding), reason)
-			if err == nil {
+			changed, err := w.svc.TransitionStatus(ctx, transferID, string(models.TransferStatusDebited), string(models.TransferStatusRefunding), reason, uuid.NewString())
+			if err == nil && changed {
 				w.publishCreditFailed(ctx, transferID.String(), w.uuidFromPgtype(t.ReceiverWalletID), w.uuidFromPgtype(t.SenderWalletID), w.numericToString(t.Amount), reason)
 			}
 
 		case string(models.TransferStatusRefunding):
 			// REFUNDING -> MANUAL_REVIEW
 			reason := "Saga timeout: no response after transfer.credit.failed"
-			err := w.svc.UpdateStatus(ctx, transferID, string(models.TransferStatusManualReview), reason)
-			if err == nil {
+			changed, err := w.svc.TransitionStatus(ctx, transferID, string(models.TransferStatusRefunding), string(models.TransferStatusManualReview), reason, uuid.NewString())
+			if err == nil && changed {
 				w.log.Error().
 					Str("transfer_id", transferID.String()).
 					Msg("CRITICAL: Transfer stuck in REFUNDING state, escalating to MANUAL_REVIEW")

@@ -69,19 +69,35 @@ func (c *TransferConsumer) Start(ctx context.Context) error {
 
 func (c *TransferConsumer) handleDebitSuccess(ctx context.Context, event *models.Event) error {
 	middleware.RecordKafkaEvent(models.TopicTransferDebitSuccess, "success")
-	transferID, _ := uuid.Parse(event.CorrelationID)
-	return c.svc.UpdateStatus(ctx, transferID, "DEBITED", "")
+	transferID, err := transferIDFromEvent(event)
+	if err != nil {
+		return err
+	}
+	_, err = c.svc.TransitionStatus(ctx, transferID, "PENDING", "DEBITED", "", event.EventID)
+	return err
 }
 
 func (c *TransferConsumer) handleDebitFailed(ctx context.Context, event *models.Event) error {
-	transferID, _ := uuid.Parse(event.CorrelationID)
-
-	payloadBytes, _ := json.Marshal(event.Payload)
-	var payload models.DebitResultPayload
-	_ = json.Unmarshal(payloadBytes, &payload)
-
-	if err := c.svc.UpdateStatus(ctx, transferID, "FAILED", payload.Reason); err != nil {
+	transferID, err := transferIDFromEvent(event)
+	if err != nil {
 		return err
+	}
+
+	payloadBytes, err := json.Marshal(event.Payload)
+	if err != nil {
+		return err
+	}
+	var payload models.DebitResultPayload
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return err
+	}
+
+	changed, err := c.svc.TransitionStatus(ctx, transferID, "PENDING", "FAILED", payload.Reason, event.EventID)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
 	}
 
 	// Publish transfer.failed event for notification service
@@ -100,19 +116,31 @@ func (c *TransferConsumer) handleDebitFailed(ctx context.Context, event *models.
 
 func (c *TransferConsumer) handleCreditSuccess(ctx context.Context, event *models.Event) error {
 	middleware.RecordKafkaEvent(models.TopicTransferCreditSuccess, "success")
-	transferID, _ := uuid.Parse(event.CorrelationID)
-
-	if err := c.svc.UpdateStatus(ctx, transferID, "COMPLETED", ""); err != nil {
+	transferID, err := transferIDFromEvent(event)
+	if err != nil {
 		return err
+	}
+
+	changed, err := c.svc.TransitionStatus(ctx, transferID, "DEBITED", "COMPLETED", "", event.EventID)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
 	}
 
 	// Record successful transfer
 	middleware.RecordTransfer("COMPLETED")
 
 	// Publish transfer.completed event for notification service
-	payloadBytes, _ := json.Marshal(event.Payload)
+	payloadBytes, err := json.Marshal(event.Payload)
+	if err != nil {
+		return err
+	}
 	var payload models.CreditResultPayload
-	_ = json.Unmarshal(payloadBytes, &payload)
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return err
+	}
 
 	completedPayload := models.TransferCompletedPayload{
 		TransferID:       payload.TransferID,
@@ -129,26 +157,42 @@ func (c *TransferConsumer) handleCreditSuccess(ctx context.Context, event *model
 }
 
 func (c *TransferConsumer) handleCreditFailed(ctx context.Context, event *models.Event) error {
-	transferID, _ := uuid.Parse(event.CorrelationID)
+	transferID, err := transferIDFromEvent(event)
+	if err != nil {
+		return err
+	}
 	// Update status to REFUNDING (refund is triggered by Wallet Service in choreography)
-	return c.svc.UpdateStatus(ctx, transferID, "REFUNDING", "Credit failed, awaiting refund")
+	_, err = c.svc.TransitionStatus(ctx, transferID, "DEBITED", "REFUNDING", "Credit failed, awaiting refund", event.EventID)
+	return err
 }
 
 func (c *TransferConsumer) handleRefundSuccess(ctx context.Context, event *models.Event) error {
 	middleware.RecordKafkaEvent(models.TopicTransferRefundSuccess, "success")
-	transferID, _ := uuid.Parse(event.CorrelationID)
-
-	if err := c.svc.UpdateStatus(ctx, transferID, "FAILED", "Refunded after credit failure"); err != nil {
+	transferID, err := transferIDFromEvent(event)
+	if err != nil {
 		return err
+	}
+
+	changed, err := c.svc.TransitionStatus(ctx, transferID, "REFUNDING", "FAILED", "Refunded after credit failure", event.EventID)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
 	}
 
 	// Record failed transfer
 	middleware.RecordTransfer("FAILED")
 
 	// Publish transfer.failed with refund info
-	payloadBytes, _ := json.Marshal(event.Payload)
+	payloadBytes, err := json.Marshal(event.Payload)
+	if err != nil {
+		return err
+	}
 	var payload models.RefundResultPayload
-	_ = json.Unmarshal(payloadBytes, &payload)
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return err
+	}
 
 	failPayload := models.TransferFailedPayload{
 		TransferID:     payload.TransferID,
@@ -161,4 +205,11 @@ func (c *TransferConsumer) handleRefundSuccess(ctx context.Context, event *model
 
 	failEvent := models.NewEvent(models.TopicTransferFailed, event.CorrelationID, "transaction-service", failPayloadMap)
 	return c.producer.Publish(ctx, models.TopicTransferFailed, failEvent)
+}
+
+func transferIDFromEvent(event *models.Event) (uuid.UUID, error) {
+	if _, err := uuid.Parse(event.EventID); err != nil {
+		return uuid.Nil, err
+	}
+	return uuid.Parse(event.CorrelationID)
 }

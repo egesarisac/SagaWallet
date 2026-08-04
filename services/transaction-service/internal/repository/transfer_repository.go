@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -34,6 +36,13 @@ func uuidToPgtype(id uuid.UUID) pgtype.UUID {
 	return pgtype.UUID{Bytes: id, Valid: true}
 }
 
+func nullableUUID(id uuid.UUID) pgtype.UUID {
+	if id == uuid.Nil {
+		return pgtype.UUID{}
+	}
+	return uuidToPgtype(id)
+}
+
 func stringToNumeric(s string) pgtype.Numeric {
 	var n pgtype.Numeric
 	_ = n.Scan(s)
@@ -59,12 +68,168 @@ func (r *TransferRepository) CreateTransfer(
 		ReceiverWalletID: uuidToPgtype(receiverWalletID),
 		Amount:           stringToNumeric(amount),
 		Currency:         currency,
-		IdempotencyKey:   uuidToPgtype(idempotencyKey),
+		IdempotencyKey:   nullableUUID(idempotencyKey),
 	})
 	if err != nil {
 		return nil, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to create transfer", err)
 	}
 	return &transfer, nil
+}
+
+// OutboxEvent is a claimed event that must be published to Kafka.
+type OutboxEvent struct {
+	ID         uuid.UUID
+	Topic      string
+	MessageKey string
+	Payload    []byte
+	Attempts   int
+}
+
+// CreateTransferWithOutbox atomically records a transfer, audit record, and start event.
+func (r *TransferRepository) CreateTransferWithOutbox(
+	ctx context.Context,
+	transferID uuid.UUID,
+	senderWalletID, receiverWalletID uuid.UUID,
+	amount, currency string,
+	idempotencyKey uuid.UUID,
+	eventID uuid.UUID,
+	topic string,
+	eventPayload interface{},
+) (*db.Transfer, error) {
+	payload, err := json.Marshal(eventPayload)
+	if err != nil {
+		return nil, apperrors.Wrap(apperrors.CodeInternalError, "failed to marshal outbox event", err)
+	}
+
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to begin transfer transaction", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	const transferColumns = `id, sender_wallet_id, receiver_wallet_id, amount, currency, status, failure_reason, idempotency_key, created_at, updated_at`
+	row := tx.QueryRow(ctx, `
+		INSERT INTO transfers (id, sender_wallet_id, receiver_wallet_id, amount, currency, status, idempotency_key)
+		VALUES ($1, $2, $3, $4, $5, 'PENDING', $6)
+		RETURNING `+transferColumns,
+		uuidToPgtype(transferID), uuidToPgtype(senderWalletID), uuidToPgtype(receiverWalletID), stringToNumeric(amount), currency, nullableUUID(idempotencyKey),
+	)
+	transfer, err := scanTransfer(row)
+	if err != nil {
+		return nil, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to create transfer", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO saga_events (transfer_id, event_type, payload)
+		VALUES ($1, 'TRANSFER_CREATED', $2)`, transfer.ID, payload); err != nil {
+		return nil, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to create transfer audit event", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO outbox_events (id, aggregate_id, topic, message_key, payload)
+		VALUES ($1, $2, $3, $4, $5)`, uuidToPgtype(eventID), transfer.ID, topic, GetTransferID(transfer).String(), payload); err != nil {
+		return nil, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to create outbox event", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to commit transfer transaction", err)
+	}
+	return transfer, nil
+}
+
+type transferRow interface {
+	Scan(dest ...any) error
+}
+
+func scanTransfer(row transferRow) (*db.Transfer, error) {
+	var transfer db.Transfer
+	err := row.Scan(
+		&transfer.ID,
+		&transfer.SenderWalletID,
+		&transfer.ReceiverWalletID,
+		&transfer.Amount,
+		&transfer.Currency,
+		&transfer.Status,
+		&transfer.FailureReason,
+		&transfer.IdempotencyKey,
+		&transfer.CreatedAt,
+		&transfer.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &transfer, nil
+}
+
+// ClaimOutbox leases a batch so multiple publishers can work safely.
+func (r *TransferRepository) ClaimOutbox(ctx context.Context, batchSize, lockSeconds int) ([]OutboxEvent, error) {
+	rows, err := r.pool.Query(ctx, `
+		WITH candidates AS (
+			SELECT id
+			FROM outbox_events
+			WHERE published_at IS NULL
+			  AND next_attempt_at <= NOW()
+			  AND (locked_until IS NULL OR locked_until < NOW())
+			ORDER BY created_at
+			FOR UPDATE SKIP LOCKED
+			LIMIT $1
+		)
+		UPDATE outbox_events AS outbox
+		SET locked_until = NOW() + ($2 * INTERVAL '1 second'), attempts = outbox.attempts + 1
+		FROM candidates
+		WHERE outbox.id = candidates.id
+		RETURNING outbox.id, outbox.topic, outbox.message_key, outbox.payload, outbox.attempts`, batchSize, lockSeconds)
+	if err != nil {
+		return nil, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to claim outbox events", err)
+	}
+	defer rows.Close()
+
+	events := make([]OutboxEvent, 0, batchSize)
+	for rows.Next() {
+		var event OutboxEvent
+		var id pgtype.UUID
+		if err := rows.Scan(&id, &event.Topic, &event.MessageKey, &event.Payload, &event.Attempts); err != nil {
+			return nil, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to scan outbox event", err)
+		}
+		event.ID = pgtypeToUUID(id)
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to read claimed outbox events", err)
+	}
+	return events, nil
+}
+
+// MarkOutboxPublished marks a successfully delivered event immutable.
+func (r *TransferRepository) MarkOutboxPublished(ctx context.Context, eventID uuid.UUID) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE outbox_events
+		SET published_at = NOW(), locked_until = NULL, last_error = NULL
+		WHERE id = $1`, uuidToPgtype(eventID))
+	if err != nil {
+		return apperrors.Wrap(apperrors.CodeDatabaseError, "failed to mark outbox event published", err)
+	}
+	return nil
+}
+
+// ReleaseOutbox schedules a failed event for a later retry.
+func (r *TransferRepository) ReleaseOutbox(ctx context.Context, eventID uuid.UUID, attempts int, cause error) error {
+	delay := time.Duration(1<<min(attempts, 6)) * time.Second
+	_, err := r.pool.Exec(ctx, `
+		UPDATE outbox_events
+		SET locked_until = NULL, next_attempt_at = NOW() + ($2 * INTERVAL '1 second'), last_error = $3
+		WHERE id = $1`, uuidToPgtype(eventID), int(delay.Seconds()), cause.Error())
+	if err != nil {
+		return apperrors.Wrap(apperrors.CodeDatabaseError, "failed to release outbox event", err)
+	}
+	return nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // GetTransferByID retrieves a transfer by its ID.
@@ -110,6 +275,48 @@ func (r *TransferRepository) UpdateTransferStatus(ctx context.Context, transferI
 		return nil, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to update transfer status", err)
 	}
 	return &transfer, nil
+}
+
+// TransitionStatus updates a transfer only from its expected current state.
+// A false result means a duplicate, stale, or out-of-order event was ignored.
+func (r *TransferRepository) TransitionStatus(ctx context.Context, transferID uuid.UUID, expectedStatus, status, failureReason string, eventID uuid.UUID) (bool, error) {
+	if !IsAllowedTransition(expectedStatus, status) {
+		return false, apperrors.New(apperrors.CodeValidationFailed, fmt.Sprintf("invalid transfer transition %s -> %s", expectedStatus, status))
+	}
+
+	command, err := r.pool.Exec(ctx, `
+		UPDATE transfers
+		SET status = $3, failure_reason = NULLIF($4, ''), last_event_id = $5, updated_at = NOW()
+		WHERE id = $1 AND status = $2`, uuidToPgtype(transferID), expectedStatus, status, failureReason, uuidToPgtype(eventID))
+	if err != nil {
+		return false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to transition transfer", err)
+	}
+	if command.RowsAffected() == 1 {
+		return true, nil
+	}
+
+	var exists bool
+	if err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfers WHERE id = $1)`, uuidToPgtype(transferID)).Scan(&exists); err != nil {
+		return false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to verify transfer", err)
+	}
+	if !exists {
+		return false, apperrors.TransferNotFound(transferID.String())
+	}
+	return false, nil
+}
+
+// IsAllowedTransition centralizes the saga's legal state machine edges.
+func IsAllowedTransition(from, to string) bool {
+	switch from {
+	case "PENDING":
+		return to == "DEBITED" || to == "FAILED"
+	case "DEBITED":
+		return to == "COMPLETED" || to == "REFUNDING"
+	case "REFUNDING":
+		return to == "FAILED" || to == "MANUAL_REVIEW"
+	default:
+		return false
+	}
 }
 
 // ListTransfersBySender lists transfers by sender wallet ID.

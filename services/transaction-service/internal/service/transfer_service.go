@@ -4,6 +4,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/google/uuid"
 
@@ -123,35 +124,7 @@ func (s *TransferService) CreateTransfer(ctx context.Context, input CreateTransf
 		}
 	}
 
-	// Create transfer record
-	transfer, err := s.repo.CreateTransfer(
-		ctx,
-		input.SenderWalletID,
-		input.ReceiverWalletID,
-		input.Amount,
-		input.Currency,
-		input.IdempotencyKey,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	transferID := repository.GetTransferID(transfer)
-	s.log.Info().
-		Str("transfer_id", transferID.String()).
-		Str("sender", input.SenderWalletID.String()).
-		Str("receiver", input.ReceiverWalletID.String()).
-		Str("amount", input.Amount).
-		Msg("Transfer created, starting saga")
-
-	// Log saga event
-	_, _ = s.repo.CreateSagaEvent(ctx, transferID, "TRANSFER_CREATED", map[string]interface{}{
-		"sender_wallet_id":   input.SenderWalletID.String(),
-		"receiver_wallet_id": input.ReceiverWalletID.String(),
-		"amount":             input.Amount,
-	})
-
-	// Publish transfer.created event to start the saga
+	transferID := uuid.New()
 	payload := models.TransferCreatedPayload{
 		TransferID:       transferID.String(),
 		SenderWalletID:   input.SenderWalletID.String(),
@@ -159,20 +132,56 @@ func (s *TransferService) CreateTransfer(ctx context.Context, input CreateTransf
 		Amount:           input.Amount,
 		Currency:         input.Currency,
 	}
-	payloadMap := make(map[string]interface{})
-	b, _ := json.Marshal(payload)
-	_ = json.Unmarshal(b, &payloadMap)
-
-	event := models.NewEvent(models.TopicTransferCreated, transferID.String(), "transaction-service", payloadMap)
-	if err := s.producer.Publish(ctx, models.TopicTransferCreated, event); err != nil {
-		s.log.WithError(err).Error().Msg("Failed to publish transfer.created event")
-		// Don't fail the request, the transfer is still created
+	payloadMap, err := payloadToMap(payload)
+	if err != nil {
+		return nil, err
 	}
+	event := models.NewEvent(models.TopicTransferCreated, transferID.String(), "transaction-service", payloadMap)
+	eventID, err := uuid.Parse(event.EventID)
+	if err != nil {
+		return nil, apperrors.Wrap(apperrors.CodeInternalError, "failed to create transfer event ID", err)
+	}
+
+	// Persist the command and its start event together. Kafka is never a second commit point.
+	transfer, err := s.repo.CreateTransferWithOutbox(
+		ctx,
+		transferID,
+		input.SenderWalletID,
+		input.ReceiverWalletID,
+		input.Amount,
+		input.Currency,
+		input.IdempotencyKey,
+		eventID,
+		models.TopicTransferCreated,
+		event,
+	)
+	if err != nil {
+		return nil, err
+	}
+	transferID = repository.GetTransferID(transfer)
+	s.log.Info().
+		Str("transfer_id", transferID.String()).
+		Str("sender", input.SenderWalletID.String()).
+		Str("receiver", input.ReceiverWalletID.String()).
+		Str("amount", input.Amount).
+		Msg("Transfer created, starting saga")
 
 	return &TransferResult{
 		TransferID: transferID.String(),
 		Status:     transfer.Status,
 	}, nil
+}
+
+func payloadToMap(payload interface{}) (map[string]interface{}, error) {
+	bytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, apperrors.Wrap(apperrors.CodeInternalError, "failed to marshal event payload", err)
+	}
+	result := make(map[string]interface{})
+	if err := json.Unmarshal(bytes, &result); err != nil {
+		return nil, apperrors.Wrap(apperrors.CodeInternalError, "failed to unmarshal event payload", err)
+	}
+	return result, nil
 }
 
 // GetTransfer retrieves a transfer by ID.
@@ -210,23 +219,28 @@ func (s *TransferService) GetTransfer(ctx context.Context, transferID uuid.UUID,
 	}, nil
 }
 
-// UpdateStatus updates the status of a transfer (called by consumer).
-func (s *TransferService) UpdateStatus(ctx context.Context, transferID uuid.UUID, status, failureReason string) error {
-	_, err := s.repo.UpdateTransferStatus(ctx, transferID, status, failureReason)
+// TransitionStatus applies a legal saga transition once for an incoming event.
+func (s *TransferService) TransitionStatus(ctx context.Context, transferID uuid.UUID, expectedStatus, status, failureReason, eventID string) (bool, error) {
+	parsedEventID, err := uuid.Parse(eventID)
 	if err != nil {
-		return err
+		return false, apperrors.New(apperrors.CodeValidationFailed, fmt.Sprintf("invalid saga event ID: %s", eventID))
 	}
 
-	// Log saga event
-	_, _ = s.repo.CreateSagaEvent(ctx, transferID, "STATUS_UPDATED", map[string]interface{}{
-		"new_status":     status,
-		"failure_reason": failureReason,
+	changed, err := s.repo.TransitionStatus(ctx, transferID, expectedStatus, status, failureReason, parsedEventID)
+	if err != nil || !changed {
+		return changed, err
+	}
+
+	_, auditErr := s.repo.CreateSagaEvent(ctx, transferID, "STATUS_UPDATED", map[string]interface{}{
+		"event_id":        eventID,
+		"previous_status": expectedStatus,
+		"new_status":      status,
+		"failure_reason":  failureReason,
 	})
+	if auditErr != nil {
+		s.log.WithError(auditErr).WithField("transfer_id", transferID.String()).Warn().Msg("Failed to record status transition audit event")
+	}
 
-	s.log.Info().
-		Str("transfer_id", transferID.String()).
-		Str("new_status", status).
-		Msg("Transfer status updated")
-
-	return nil
+	s.log.Info().Str("transfer_id", transferID.String()).Str("new_status", status).Msg("Transfer status transitioned")
+	return true, nil
 }

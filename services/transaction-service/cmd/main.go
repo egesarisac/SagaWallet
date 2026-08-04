@@ -156,6 +156,8 @@ func main() {
 
 	// Start Kafka consumer in background
 	ctx, cancel := context.WithCancel(context.Background())
+	outboxPublisher := service.NewOutboxPublisher(transferRepo, producer, log)
+	go outboxPublisher.Start(ctx, time.Second)
 	go func() {
 		log.Info().Msg("Starting Transfer Consumer (Saga Observer)...")
 		if err := transferConsumer.Start(ctx); err != nil {

@@ -91,7 +91,11 @@ func main() {
 		Password: os.Getenv("KAFKA_PASSWORD"),
 		TLS:      os.Getenv("KAFKA_TLS") == "true",
 	}, log)
-	defer producer.Close()
+	defer func() {
+		if err := producer.Close(); err != nil {
+			log.WithError(err).Error().Msg("Failed to close Kafka producer")
+		}
+	}()
 
 	if err := producer.Publish(context.Background(), target, deadLetter.OriginalEvent); err != nil {
 		fatal(err)
@@ -143,8 +147,11 @@ func appendAudit(path string, record replayAuditRecord) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
-	return json.NewEncoder(file).Encode(record)
+	if err := json.NewEncoder(file).Encode(record); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
 }
 
 func defaultActor() string {

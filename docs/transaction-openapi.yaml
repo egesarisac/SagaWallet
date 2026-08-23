@@ -36,6 +36,7 @@ paths:
     get:
       tags: [Health]
       summary: Health check
+      security: []
       responses:
         '200':
           description: Service is healthy
@@ -52,6 +53,7 @@ paths:
     get:
       tags: [Health]
       summary: Prometheus metrics
+      security: []
       responses:
         '200':
           description: Prometheus metrics

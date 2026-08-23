@@ -73,7 +73,11 @@ func main() {
 		Password: cfg.Kafka.Password,
 		TLS:      cfg.Kafka.TLS,
 	}, log)
-	defer producer.Close()
+	defer func() {
+		if err := producer.Close(); err != nil {
+			log.WithError(err).Error().Msg("Failed to close Kafka producer")
+		}
+	}()
 	log.Info().Msg("Kafka producer initialized")
 
 	// Initialize layers

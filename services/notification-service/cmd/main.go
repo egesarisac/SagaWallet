@@ -44,7 +44,11 @@ func main() {
 		Password: cfg.Kafka.Password,
 		TLS:      cfg.Kafka.TLS,
 	}, log)
-	defer producer.Close()
+	defer func() {
+		if err := producer.Close(); err != nil {
+			log.WithError(err).Error().Msg("Failed to close Kafka producer")
+		}
+	}()
 	log.Info().Msg("Kafka producer initialized")
 
 	// Create notifier
@@ -76,24 +80,7 @@ func main() {
 	}()
 
 	// Setup Gin router (health checks only)
-	if cfg.Log.Level != "debug" {
-		gin.SetMode(gin.ReleaseMode)
-	}
-	router := gin.New()
-	router.Use(gin.Recovery())
-
-	// Health check endpoints
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status":  "healthy",
-			"service": "notification-service",
-		})
-	})
-	router.GET("/ready", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status": "ready",
-		})
-	})
+	router := newRouter(cfg.Log.Level)
 
 	// Start HTTP server
 	httpAddr := fmt.Sprintf(":%d", cfg.HTTPPort)
@@ -124,6 +111,26 @@ func main() {
 		log.WithError(err).Error().Msg("Server shutdown error")
 	}
 
-	kafkaConsumer.Close()
+	if err := kafkaConsumer.Close(); err != nil {
+		log.WithError(err).Error().Msg("Failed to close Kafka consumer")
+	}
 	log.Info().Msg("Notification service stopped")
+}
+
+func newRouter(logLevel string) *gin.Engine {
+	if logLevel != "debug" {
+		gin.SetMode(gin.ReleaseMode)
+	}
+	router := gin.New()
+	router.Use(gin.Recovery())
+	router.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "healthy",
+			"service": "notification-service",
+		})
+	})
+	router.GET("/ready", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ready"})
+	})
+	return router
 }

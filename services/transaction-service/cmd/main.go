@@ -105,7 +105,11 @@ func main() {
 		Password: cfg.Kafka.Password,
 		TLS:      cfg.Kafka.TLS,
 	}, log)
-	defer producer.Close()
+	defer func() {
+		if err := producer.Close(); err != nil {
+			log.WithError(err).Error().Msg("Failed to close Kafka producer")
+		}
+	}()
 	log.Info().Msg("Kafka producer initialized")
 
 	// Initialize Wallet gRPC Client
@@ -123,7 +127,11 @@ func main() {
 	if err != nil {
 		log.WithError(err).Warn().Msg("Failed to connect to Wallet gRPC service (non-fatal)")
 	} else {
-		defer walletClient.Close()
+		defer func() {
+			if err := walletClient.Close(); err != nil {
+				log.WithError(err).Error().Msg("Failed to close Wallet gRPC client")
+			}
+		}()
 		log.Info().Str("addr", walletGrpcAddr).Msg("Wallet gRPC client initialized")
 	}
 

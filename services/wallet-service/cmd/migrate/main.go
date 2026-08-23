@@ -48,17 +48,18 @@ func main() {
 		log.Fatalf("failed to create migrate instance: %v", err)
 	}
 
-	if cmd == "up" {
+	switch cmd {
+	case "up":
 		if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 			log.Fatalf("failed to run migrate up: %v", err)
 		}
 		fmt.Println("Wallet migrations applied successfully!")
-	} else if cmd == "down" {
+	case "down":
 		if err := m.Down(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 			log.Fatalf("failed to run migrate down: %v", err)
 		}
 		fmt.Println("Wallet migrations rolled back successfully!")
-	} else {
+	default:
 		log.Fatalf("unknown command: %s", cmd)
 	}
 }

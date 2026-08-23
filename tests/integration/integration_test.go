@@ -59,10 +59,10 @@ func requireServices(t *testing.T) {
 			t.Fatalf("%s service is unavailable: %v", name, err)
 		}
 		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			t.Fatalf("%s service health check returned %d", name, resp.StatusCode)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 }
 
@@ -103,7 +103,7 @@ func createTestWallet(t *testing.T, currency string) string {
 	}
 
 	resp := makeRequest(t, "POST", walletServiceURL+"/api/v1/wallets", body)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("Failed to create test wallet: status %d", resp.StatusCode)
@@ -160,7 +160,7 @@ func registerFixtureUser() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusCreated {
 		return "", fmt.Errorf("auth registration returned %d", resp.StatusCode)
 	}
@@ -196,7 +196,7 @@ func deleteWallet(walletID string) {
 		fmt.Printf("   ❌ Failed to delete %s: %v\n", walletID, err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK {
 		fmt.Printf("   ✓ Deleted %s\n", walletID)
@@ -221,7 +221,7 @@ func TestHealthEndpoints(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			resp, err := http.Get(tt.url)
 			require.NoError(t, err)
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 
 			assert.Equal(t, http.StatusOK, resp.StatusCode)
 		})
@@ -237,7 +237,7 @@ func TestCreateWallet(t *testing.T) {
 	}
 
 	resp := makeRequest(t, "POST", walletServiceURL+"/api/v1/wallets", body)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusCreated, resp.StatusCode)
 
@@ -284,7 +284,7 @@ func TestGetWallet(t *testing.T) {
 
 	// Now get it
 	resp := makeRequest(t, "GET", walletServiceURL+"/api/v1/wallets/"+walletID, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
@@ -305,7 +305,7 @@ func TestGetWalletUnauthorized(t *testing.T) {
 	// Request without token
 	resp, err := http.Get(walletServiceURL + "/api/v1/wallets/" + walletID)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
@@ -317,12 +317,12 @@ func waitForTransferStatus(t *testing.T, transferID, expectedStatus string) map[
 	for time.Now().Before(deadline) {
 		resp := makeRequest(t, "GET", transactionServiceURL+"/api/v1/transfers/"+transferID, nil)
 		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			t.Fatalf("get transfer returned %d", resp.StatusCode)
 		}
 		var result map[string]interface{}
 		err := json.NewDecoder(resp.Body).Decode(&result)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		require.NoError(t, err)
 		data, ok := result["data"].(map[string]interface{})
 		if !ok {
@@ -360,7 +360,7 @@ func TestTransferFlow(t *testing.T) {
 		"description":  "Test credit",
 	}
 	creditResp := makeRequest(t, "POST", walletServiceURL+"/api/v1/wallets/"+senderWalletID+"/credit", creditBody)
-	creditResp.Body.Close()
+	_ = creditResp.Body.Close()
 	require.Equal(t, http.StatusOK, creditResp.StatusCode)
 
 	// Create transfer
@@ -371,7 +371,7 @@ func TestTransferFlow(t *testing.T) {
 	}
 
 	resp := makeRequest(t, "POST", transactionServiceURL+"/api/v1/transfers", body)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	require.Equal(t, http.StatusAccepted, resp.StatusCode)
 
@@ -400,7 +400,7 @@ func TestRateLimiting(t *testing.T) {
 		if resp.StatusCode == http.StatusTooManyRequests {
 			rateLimitedCount++
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 
 	// If rate limiting is disabled (DISABLE_RATE_LIMIT=true), skip the assertion
@@ -435,7 +435,7 @@ func TestTransferInsufficientFunds(t *testing.T) {
 	}
 
 	resp := makeRequest(t, "POST", transactionServiceURL+"/api/v1/transfers", body)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	require.Equal(t, http.StatusAccepted, resp.StatusCode)
 
@@ -481,7 +481,7 @@ func TestTransferInvalidReceiver(t *testing.T) {
 		"description":  "Initial balance",
 	}
 	creditResp := makeRequest(t, "POST", walletServiceURL+"/api/v1/wallets/"+senderWalletID+"/credit", creditBody)
-	creditResp.Body.Close()
+	_ = creditResp.Body.Close()
 	require.Equal(t, http.StatusOK, creditResp.StatusCode)
 
 	// Verify initial balance
@@ -498,7 +498,7 @@ func TestTransferInvalidReceiver(t *testing.T) {
 	}
 
 	resp := makeRequest(t, "POST", transactionServiceURL+"/api/v1/transfers", body)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	require.Equal(t, http.StatusAccepted, resp.StatusCode)
 
@@ -536,7 +536,7 @@ func TestSuccessfulTransferBalanceVerification(t *testing.T) {
 		"description":  "Initial balance",
 	}
 	creditResp := makeRequest(t, "POST", walletServiceURL+"/api/v1/wallets/"+senderWalletID+"/credit", creditBody)
-	creditResp.Body.Close()
+	_ = creditResp.Body.Close()
 	require.Equal(t, http.StatusOK, creditResp.StatusCode)
 
 	// Transfer 30 TRY
@@ -547,7 +547,7 @@ func TestSuccessfulTransferBalanceVerification(t *testing.T) {
 	}
 
 	resp := makeRequest(t, "POST", transactionServiceURL+"/api/v1/transfers", body)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	require.Equal(t, http.StatusAccepted, resp.StatusCode)
 
@@ -573,7 +573,7 @@ func TestSuccessfulTransferBalanceVerification(t *testing.T) {
 // Helper function to get wallet balance
 func getWalletBalance(t *testing.T, walletID string) string {
 	resp := makeRequest(t, "GET", walletServiceURL+"/api/v1/wallets/"+walletID+"/balance", nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("Failed to get wallet balance: status %d", resp.StatusCode)

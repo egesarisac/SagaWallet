@@ -320,7 +320,7 @@ sagawallet/
 | `make migrate-txn` | Run transaction service migrations |
 | `make retry-outbox OUTBOX_ID=... REASON=...` | Audit and retry one unpublished outbox event |
 | `make test` | Run all unit tests |
-| `make ci` | Run formatting, lint, and race-detection checks |
+| `make ci` | Run formatting, lint, race/coverage, contracts, security/SBOM, and integration checks |
 | `make test-integration` | Run full saga flow integration tests |
 
 ---

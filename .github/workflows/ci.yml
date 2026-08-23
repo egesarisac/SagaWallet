@@ -47,7 +47,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
-          cache-dependency-path: ${{ matrix.module }}/go.sum
+          cache-dependency-path: ${{ matrix.module }}/go.mod
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
@@ -61,32 +61,51 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        module:
-          - api
-          - pkg
-          - pkg/errors
-          - pkg/middleware
-          - services/auth-service
-          - services/notification-service
-          - services/transaction-service
-          - services/wallet-service
-          - tools/eventreplay
-          - tools/tokengen
+        include:
+          - module: api
+            coverage_min: 0
+            artifact: api
+          - module: pkg
+            coverage_min: 25
+            artifact: pkg
+          - module: pkg/errors
+            coverage_min: 0
+            artifact: pkg-errors
+          - module: pkg/middleware
+            coverage_min: 50
+            artifact: pkg-middleware
+          - module: services/auth-service
+            coverage_min: 30
+            artifact: auth-service
+          - module: services/notification-service
+            coverage_min: 20
+            artifact: notification-service
+          - module: services/transaction-service
+            coverage_min: 5
+            artifact: transaction-service
+          - module: services/wallet-service
+            coverage_min: 5
+            artifact: wallet-service
+          - module: tools/eventreplay
+            coverage_min: 10
+            artifact: eventreplay
+          - module: tools/tokengen
+            coverage_min: 0
+            artifact: tokengen
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
-          cache-dependency-path: ${{ matrix.module }}/go.sum
-      - name: Run unit tests with race detection
-        working-directory: ${{ matrix.module }}
-        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+          cache-dependency-path: ${{ matrix.module }}/go.mod
+      - name: Run race tests and enforce coverage
+        run: make test-module MODULE=${{ matrix.module }} COVERAGE_MIN=${{ matrix.coverage_min }}
       - name: Upload coverage
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-${{ matrix.module }}
+          name: coverage-${{ matrix.artifact }}
           path: ${{ matrix.module }}/coverage.out
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   integration:
     name: Integration
@@ -114,8 +133,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: Validate OpenAPI contracts
-        run: npx --yes @redocly/cli@1.25.0 lint docs/openapi.yaml docs/wallet-openapi.yaml docs/transaction-openapi.yaml
+        run: make contract
 
   security:
     name: Security and SBOM
@@ -123,8 +145,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Scan repository dependencies and configuration
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
+          version: v0.58.1
           scan-type: fs
           format: table
           exit-code: '1'
@@ -132,6 +155,7 @@ jobs:
       - name: Generate CycloneDX SBOM
         uses: anchore/sbom-action@v0.17.8
         with:
+          syft-version: v1.18.1
           format: cyclonedx-json
           output-file: sbom.cdx.json
       - name: Upload SBOM

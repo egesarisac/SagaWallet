@@ -34,8 +34,21 @@ git push -u origin feat/wallet-add-balance-filter
 
 ## CI/CD Behavior
 
-- On PR to `main`: run lint and tests.
-- On push to `main` (after merge): build images and deploy.
+- On PR to `main`: run formatting, pinned lint, race tests with coverage floors,
+  integration tests, OpenAPI contract validation, vulnerability scanning, and
+  SBOM generation.
+- On push to `main` (after merge): repeat CI, then build immutable images and
+  deploy only the validated commit.
+
+Run the same quality gate locally with:
+
+```bash
+make ci
+```
+
+The complete command requires Docker, Node.js, Trivy v0.58.1, and Syft
+v1.18.1. `make test-race`, `make contract`, and the other individual targets
+remain available when only part of the toolchain is installed.
 
 ## Merge Strategy
 

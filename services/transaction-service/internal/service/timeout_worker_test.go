@@ -11,7 +11,7 @@ import (
 
 func TestTimeoutWorker_Helpers(t *testing.T) {
 	// We instantiate a worker with nil dependencies just to test the helper methods
-	worker := NewTimeoutWorker(nil, nil, nil, nil)
+	worker := NewTimeoutWorker(nil, nil, nil)
 
 	t.Run("timeToPgTimestamptz", func(t *testing.T) {
 		now := time.Now()

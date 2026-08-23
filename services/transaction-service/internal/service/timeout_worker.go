@@ -2,14 +2,12 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"strconv"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/egesarisac/SagaWallet/pkg/kafka"
 	"github.com/egesarisac/SagaWallet/pkg/logger"
 	"github.com/egesarisac/SagaWallet/pkg/models"
 	"github.com/egesarisac/SagaWallet/services/transaction-service/internal/repository"
@@ -17,19 +15,17 @@ import (
 
 // TimeoutWorker periodically checks for and resolves stuck saga transactions.
 type TimeoutWorker struct {
-	repo     *repository.TransferRepository
-	svc      *TransferService
-	producer *kafka.Producer
-	log      *logger.Logger
+	repo *repository.TransferRepository
+	svc  *TransferService
+	log  *logger.Logger
 }
 
 // NewTimeoutWorker creates a new TimeoutWorker.
-func NewTimeoutWorker(repo *repository.TransferRepository, svc *TransferService, producer *kafka.Producer, log *logger.Logger) *TimeoutWorker {
+func NewTimeoutWorker(repo *repository.TransferRepository, svc *TransferService, log *logger.Logger) *TimeoutWorker {
 	return &TimeoutWorker{
-		repo:     repo,
-		svc:      svc,
-		producer: producer,
-		log:      log,
+		repo: repo,
+		svc:  svc,
+		log:  log,
 	}
 }
 
@@ -77,26 +73,38 @@ func (w *TimeoutWorker) processTimeouts(ctx context.Context) {
 
 		switch t.Status {
 		case string(models.TransferStatusPending):
-			// PENDING -> FAILED
 			reason := "Saga timeout: no response after transfer.created"
-			changed, err := w.svc.TransitionStatus(ctx, transferID, string(models.TransferStatusPending), string(models.TransferStatusFailed), reason, uuid.NewString())
-			if err == nil && changed {
-				w.publishTransferFailed(ctx, transferID.String(), w.uuidFromPgtype(t.SenderWalletID), reason)
+			output, err := w.transferFailedEvent(transferID.String(), w.uuidFromPgtype(t.SenderWalletID), reason)
+			if err != nil {
+				w.log.WithError(err).Error().Str("transfer_id", transferID.String()).Msg("Failed to build timeout event")
+				continue
+			}
+			if _, err := w.svc.TransitionStatusWithOutbox(ctx, transferID, string(models.TransferStatusPending), string(models.TransferStatusFailed), reason, "saga.timeout", uuid.NewString(), output); err != nil {
+				w.log.WithError(err).Warn().Str("transfer_id", transferID.String()).Msg("Failed to resolve pending transfer timeout")
 			}
 
 		case string(models.TransferStatusDebited):
-			// DEBITED -> REFUNDING
 			reason := "Saga timeout: no response after transfer.debit.success"
-			changed, err := w.svc.TransitionStatus(ctx, transferID, string(models.TransferStatusDebited), string(models.TransferStatusRefunding), reason, uuid.NewString())
-			if err == nil && changed {
-				w.publishCreditFailed(ctx, transferID.String(), w.uuidFromPgtype(t.ReceiverWalletID), w.uuidFromPgtype(t.SenderWalletID), w.numericToString(t.Amount), reason)
+			output, err := w.creditFailedEvent(transferID.String(), w.uuidFromPgtype(t.ReceiverWalletID), w.uuidFromPgtype(t.SenderWalletID), w.numericToString(t.Amount), reason)
+			if err != nil {
+				w.log.WithError(err).Error().Str("transfer_id", transferID.String()).Msg("Failed to build refund request")
+				continue
+			}
+			if _, err := w.svc.TransitionStatusWithOutbox(ctx, transferID, string(models.TransferStatusDebited), string(models.TransferStatusRefunding), reason, "saga.timeout", uuid.NewString(), output); err != nil {
+				w.log.WithError(err).Warn().Str("transfer_id", transferID.String()).Msg("Failed to resolve debited transfer timeout")
 			}
 
 		case string(models.TransferStatusRefunding):
-			// REFUNDING -> MANUAL_REVIEW
 			reason := "Saga timeout: no response after transfer.credit.failed"
-			changed, err := w.svc.TransitionStatus(ctx, transferID, string(models.TransferStatusRefunding), string(models.TransferStatusManualReview), reason, uuid.NewString())
-			if err == nil && changed {
+			output, err := w.transferFailedEvent(transferID.String(), w.uuidFromPgtype(t.SenderWalletID), reason+"; manual review required")
+			if err != nil {
+				w.log.WithError(err).Error().Str("transfer_id", transferID.String()).Msg("Failed to build manual review event")
+				continue
+			}
+			changed, err := w.svc.TransitionStatusWithOutbox(ctx, transferID, string(models.TransferStatusRefunding), string(models.TransferStatusManualReview), reason, "saga.timeout", uuid.NewString(), output)
+			if err != nil {
+				w.log.WithError(err).Warn().Str("transfer_id", transferID.String()).Msg("Failed to escalate refund timeout")
+			} else if changed {
 				w.log.Error().
 					Str("transfer_id", transferID.String()).
 					Msg("CRITICAL: Transfer stuck in REFUNDING state, escalating to MANUAL_REVIEW")
@@ -105,24 +113,20 @@ func (w *TimeoutWorker) processTimeouts(ctx context.Context) {
 	}
 }
 
-func (w *TimeoutWorker) publishTransferFailed(ctx context.Context, transferID, senderWalletID, reason string) {
+func (w *TimeoutWorker) transferFailedEvent(transferID, senderWalletID, reason string) (*models.Event, error) {
 	payload := models.TransferFailedPayload{
 		TransferID:     transferID,
 		SenderWalletID: senderWalletID,
 		Reason:         reason,
 	}
-	payloadMap := make(map[string]interface{})
-	b, _ := json.Marshal(payload)
-	_ = json.Unmarshal(b, &payloadMap)
-
-	event := models.NewEvent(models.TopicTransferFailed, transferID, "transaction-service-timeout", payloadMap)
-	if err := w.producer.Publish(ctx, models.TopicTransferFailed, event); err != nil {
-		w.log.WithError(err).Error().Str("transfer_id", transferID).Msg("Failed to publish transfer.failed due to timeout")
+	payloadMap, err := payloadToMap(payload)
+	if err != nil {
+		return nil, err
 	}
+	return models.NewEvent(models.TopicTransferFailed, transferID, "transaction-service-timeout", payloadMap), nil
 }
 
-func (w *TimeoutWorker) publishCreditFailed(ctx context.Context, transferID, receiverWalletID, senderWalletID, amount, reason string) {
-	// Publish as transfer.credit.failed so the Wallet Service picks it up and refunds the sender.
+func (w *TimeoutWorker) creditFailedEvent(transferID, receiverWalletID, senderWalletID, amount, reason string) (*models.Event, error) {
 	payload := models.CreditResultPayload{
 		TransferID:     transferID,
 		WalletID:       receiverWalletID,
@@ -130,14 +134,11 @@ func (w *TimeoutWorker) publishCreditFailed(ctx context.Context, transferID, rec
 		Amount:         amount,
 		Reason:         reason,
 	}
-	payloadMap := make(map[string]interface{})
-	b, _ := json.Marshal(payload)
-	_ = json.Unmarshal(b, &payloadMap)
-
-	event := models.NewEvent(models.TopicTransferCreditFailed, transferID, "transaction-service-timeout", payloadMap)
-	if err := w.producer.Publish(ctx, models.TopicTransferCreditFailed, event); err != nil {
-		w.log.WithError(err).Error().Str("transfer_id", transferID).Msg("Failed to publish transfer.credit.failed due to timeout")
+	payloadMap, err := payloadToMap(payload)
+	if err != nil {
+		return nil, err
 	}
+	return models.NewEvent(models.TopicTransferCreditFailed, transferID, "transaction-service-timeout", payloadMap), nil
 }
 
 // Helpers

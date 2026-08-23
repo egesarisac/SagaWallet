@@ -1,4 +1,4 @@
-.PHONY: help proto migrate test test-unit test-race test-integration ci fmt-check run-wallet run-transaction run-notification docker-up docker-down lint
+.PHONY: help proto migrate test test-unit test-race test-integration ci fmt-check run-wallet run-transaction run-notification retry-outbox docker-up docker-down lint
 
 # Default target
 help:
@@ -17,6 +17,7 @@ help:
 	@echo "  make run-auth           Run auth service"
 	@echo "  make run-transaction    Run transaction service"
 	@echo "  make run-notification   Run notification service"
+	@echo "  make retry-outbox       Retry OUTBOX_ID with REASON (optional ACTOR)"
 	@echo "  make docker-up          Start infrastructure (Postgres, Kafka)"
 	@echo "  make docker-full        Start full stack with all services"
 	@echo "  make docker-down        Stop all Docker containers"
@@ -52,6 +53,11 @@ migrate-txn:
 migrate-txn-down:
 	@echo "Rolling back transaction service migrations..."
 	@cd services/transaction-service && go run cmd/migrate/main.go down
+
+retry-outbox:
+	@test -n "$(OUTBOX_ID)" || (echo "OUTBOX_ID is required" && exit 2)
+	@test -n "$(REASON)" || (echo "REASON is required" && exit 2)
+	@cd services/transaction-service && go run ./cmd/outbox-retry -id "$(OUTBOX_ID)" -reason "$(REASON)" $(if $(ACTOR),-actor "$(ACTOR)")
 
 # ===================
 # Testing

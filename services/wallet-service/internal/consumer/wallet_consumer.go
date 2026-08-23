@@ -10,19 +10,33 @@ import (
 	"github.com/egesarisac/SagaWallet/pkg/logger"
 	"github.com/egesarisac/SagaWallet/pkg/middleware"
 	"github.com/egesarisac/SagaWallet/pkg/models"
+	db "github.com/egesarisac/SagaWallet/services/wallet-service/db/generated"
 	"github.com/egesarisac/SagaWallet/services/wallet-service/internal/service"
 )
 
+type eventConsumer interface {
+	Start(context.Context, kafka.MessageHandler) error
+}
+
+type eventPublisher interface {
+	Publish(context.Context, string, *models.Event) error
+}
+
+type walletCommands interface {
+	DebitForEvent(context.Context, uuid.UUID, string, service.DebitInput) (*db.Wallet, bool, error)
+	CreditForEvent(context.Context, uuid.UUID, string, service.CreditInput) (*db.Wallet, bool, error)
+}
+
 // WalletConsumer handles Kafka events for wallet operations.
 type WalletConsumer struct {
-	consumer *kafka.Consumer
-	producer *kafka.Producer
-	svc      *service.WalletService
+	consumer eventConsumer
+	producer eventPublisher
+	svc      walletCommands
 	log      *logger.Logger
 }
 
 // NewWalletConsumer creates a new wallet consumer.
-func NewWalletConsumer(consumer *kafka.Consumer, producer *kafka.Producer, svc *service.WalletService, log *logger.Logger) *WalletConsumer {
+func NewWalletConsumer(consumer eventConsumer, producer eventPublisher, svc walletCommands, log *logger.Logger) *WalletConsumer {
 	return &WalletConsumer{
 		consumer: consumer,
 		producer: producer,
@@ -85,10 +99,6 @@ func (c *WalletConsumer) handleTransferCreated(ctx context.Context, event *model
 		ReferenceID: transferID,
 		Description: "Transfer Debit",
 	})
-	if duplicate {
-		return nil
-	}
-
 	if err != nil {
 		// Publish Failure Event
 		failPayload := models.DebitResultPayload{
@@ -102,6 +112,9 @@ func (c *WalletConsumer) handleTransferCreated(ctx context.Context, event *model
 
 		failEvent := models.NewEvent(models.TopicTransferDebitFailed, event.CorrelationID, "wallet-service", failPayloadMap)
 		return c.producer.Publish(ctx, models.TopicTransferDebitFailed, failEvent)
+	}
+	if duplicate {
+		c.log.Info().Str("event_id", event.EventID).Msg("Re-emitting debit result for an already applied command")
 	}
 
 	// Publish Success Event
@@ -151,10 +164,6 @@ func (c *WalletConsumer) handleDebitSuccess(ctx context.Context, event *models.E
 		ReferenceID: transferID,
 		Description: "Transfer Credit",
 	})
-	if duplicate {
-		return nil
-	}
-
 	if err != nil {
 		// Publish Credit Failure Event -> Triggers Refund
 		failPayload := models.CreditResultPayload{
@@ -170,6 +179,9 @@ func (c *WalletConsumer) handleDebitSuccess(ctx context.Context, event *models.E
 
 		failEvent := models.NewEvent(models.TopicTransferCreditFailed, event.CorrelationID, "wallet-service", failPayloadMap)
 		return c.producer.Publish(ctx, models.TopicTransferCreditFailed, failEvent)
+	}
+	if duplicate {
+		c.log.Info().Str("event_id", event.EventID).Msg("Re-emitting credit result for an already applied command")
 	}
 
 	// Publish Credit Success Event -> Saga Complete
@@ -211,13 +223,12 @@ func (c *WalletConsumer) handleCreditFailed(ctx context.Context, event *models.E
 		ReferenceID: transferID,
 		Description: "Transfer Refund",
 	})
-	if duplicate {
-		return nil
-	}
-
 	if err != nil {
 		c.log.WithError(err).Error().Msg("CRITICAL: Failed to refund sender")
 		return err
+	}
+	if duplicate {
+		c.log.Info().Str("event_id", event.EventID).Msg("Re-emitting refund result for an already applied command")
 	}
 
 	// Publish Refund Success Event

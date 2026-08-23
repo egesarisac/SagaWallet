@@ -11,22 +11,28 @@ import (
 	"github.com/egesarisac/SagaWallet/pkg/logger"
 	"github.com/egesarisac/SagaWallet/pkg/middleware"
 	"github.com/egesarisac/SagaWallet/pkg/models"
-	"github.com/egesarisac/SagaWallet/services/transaction-service/internal/service"
 )
+
+type eventConsumer interface {
+	Start(context.Context, kafka.MessageHandler) error
+}
+
+type sagaTransitions interface {
+	TransitionStatus(context.Context, uuid.UUID, string, string, string, string, string) (bool, error)
+	TransitionStatusWithOutbox(context.Context, uuid.UUID, string, string, string, string, string, *models.Event) (bool, error)
+}
 
 // TransferConsumer handles Kafka events for transfer saga observation.
 type TransferConsumer struct {
-	consumer *kafka.Consumer
-	producer *kafka.Producer
-	svc      *service.TransferService
+	consumer eventConsumer
+	svc      sagaTransitions
 	log      *logger.Logger
 }
 
 // NewTransferConsumer creates a new transfer consumer.
-func NewTransferConsumer(consumer *kafka.Consumer, producer *kafka.Producer, svc *service.TransferService, log *logger.Logger) *TransferConsumer {
+func NewTransferConsumer(consumer eventConsumer, svc sagaTransitions, log *logger.Logger) *TransferConsumer {
 	return &TransferConsumer{
 		consumer: consumer,
-		producer: producer,
 		svc:      svc,
 		log:      log,
 	}
@@ -68,12 +74,14 @@ func (c *TransferConsumer) Start(ctx context.Context) error {
 }
 
 func (c *TransferConsumer) handleDebitSuccess(ctx context.Context, event *models.Event) error {
-	middleware.RecordKafkaEvent(models.TopicTransferDebitSuccess, "success")
 	transferID, err := transferIDFromEvent(event)
 	if err != nil {
 		return err
 	}
-	_, err = c.svc.TransitionStatus(ctx, transferID, "PENDING", "DEBITED", "", event.EventID)
+	changed, err := c.svc.TransitionStatus(ctx, transferID, "PENDING", "DEBITED", "", event.EventType, event.EventID)
+	if err == nil && changed {
+		middleware.RecordKafkaEvent(models.TopicTransferDebitSuccess, "success")
+	}
 	return err
 }
 
@@ -92,15 +100,6 @@ func (c *TransferConsumer) handleDebitFailed(ctx context.Context, event *models.
 		return err
 	}
 
-	changed, err := c.svc.TransitionStatus(ctx, transferID, "PENDING", "FAILED", payload.Reason, event.EventID)
-	if err != nil {
-		return err
-	}
-	if !changed {
-		return nil
-	}
-
-	// Publish transfer.failed event for notification service
 	failPayload := models.TransferFailedPayload{
 		TransferID:     payload.TransferID,
 		SenderWalletID: payload.WalletID,
@@ -111,28 +110,18 @@ func (c *TransferConsumer) handleDebitFailed(ctx context.Context, event *models.
 	_ = json.Unmarshal(b, &failPayloadMap)
 
 	failEvent := models.NewEvent(models.TopicTransferFailed, event.CorrelationID, "transaction-service", failPayloadMap)
-	return c.producer.Publish(ctx, models.TopicTransferFailed, failEvent)
+	changed, err := c.svc.TransitionStatusWithOutbox(ctx, transferID, "PENDING", "FAILED", payload.Reason, event.EventType, event.EventID, failEvent)
+	if err == nil && changed {
+		middleware.RecordTransfer("FAILED")
+	}
+	return err
 }
 
 func (c *TransferConsumer) handleCreditSuccess(ctx context.Context, event *models.Event) error {
-	middleware.RecordKafkaEvent(models.TopicTransferCreditSuccess, "success")
 	transferID, err := transferIDFromEvent(event)
 	if err != nil {
 		return err
 	}
-
-	changed, err := c.svc.TransitionStatus(ctx, transferID, "DEBITED", "COMPLETED", "", event.EventID)
-	if err != nil {
-		return err
-	}
-	if !changed {
-		return nil
-	}
-
-	// Record successful transfer
-	middleware.RecordTransfer("COMPLETED")
-
-	// Publish transfer.completed event for notification service
 	payloadBytes, err := json.Marshal(event.Payload)
 	if err != nil {
 		return err
@@ -153,7 +142,12 @@ func (c *TransferConsumer) handleCreditSuccess(ctx context.Context, event *model
 	_ = json.Unmarshal(b, &completedPayloadMap)
 
 	completedEvent := models.NewEvent(models.TopicTransferCompleted, event.CorrelationID, "transaction-service", completedPayloadMap)
-	return c.producer.Publish(ctx, models.TopicTransferCompleted, completedEvent)
+	changed, err := c.svc.TransitionStatusWithOutbox(ctx, transferID, "DEBITED", "COMPLETED", "", event.EventType, event.EventID, completedEvent)
+	if err == nil && changed {
+		middleware.RecordKafkaEvent(models.TopicTransferCreditSuccess, "success")
+		middleware.RecordTransfer("COMPLETED")
+	}
+	return err
 }
 
 func (c *TransferConsumer) handleCreditFailed(ctx context.Context, event *models.Event) error {
@@ -162,29 +156,15 @@ func (c *TransferConsumer) handleCreditFailed(ctx context.Context, event *models
 		return err
 	}
 	// Update status to REFUNDING (refund is triggered by Wallet Service in choreography)
-	_, err = c.svc.TransitionStatus(ctx, transferID, "DEBITED", "REFUNDING", "Credit failed, awaiting refund", event.EventID)
+	_, err = c.svc.TransitionStatus(ctx, transferID, "DEBITED", "REFUNDING", "Credit failed, awaiting refund", event.EventType, event.EventID)
 	return err
 }
 
 func (c *TransferConsumer) handleRefundSuccess(ctx context.Context, event *models.Event) error {
-	middleware.RecordKafkaEvent(models.TopicTransferRefundSuccess, "success")
 	transferID, err := transferIDFromEvent(event)
 	if err != nil {
 		return err
 	}
-
-	changed, err := c.svc.TransitionStatus(ctx, transferID, "REFUNDING", "FAILED", "Refunded after credit failure", event.EventID)
-	if err != nil {
-		return err
-	}
-	if !changed {
-		return nil
-	}
-
-	// Record failed transfer
-	middleware.RecordTransfer("FAILED")
-
-	// Publish transfer.failed with refund info
 	payloadBytes, err := json.Marshal(event.Payload)
 	if err != nil {
 		return err
@@ -204,7 +184,12 @@ func (c *TransferConsumer) handleRefundSuccess(ctx context.Context, event *model
 	_ = json.Unmarshal(b, &failPayloadMap)
 
 	failEvent := models.NewEvent(models.TopicTransferFailed, event.CorrelationID, "transaction-service", failPayloadMap)
-	return c.producer.Publish(ctx, models.TopicTransferFailed, failEvent)
+	changed, err := c.svc.TransitionStatusWithOutbox(ctx, transferID, "REFUNDING", "FAILED", "Refunded after credit failure", event.EventType, event.EventID, failEvent)
+	if err == nil && changed {
+		middleware.RecordKafkaEvent(models.TopicTransferRefundSuccess, "success")
+		middleware.RecordTransfer("FAILED")
+	}
+	return err
 }
 
 func transferIDFromEvent(event *models.Event) (uuid.UUID, error) {

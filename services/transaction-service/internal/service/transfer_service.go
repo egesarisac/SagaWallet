@@ -4,12 +4,12 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
 
 	apperrors "github.com/egesarisac/SagaWallet/pkg/errors"
-	"github.com/egesarisac/SagaWallet/pkg/kafka"
 	"github.com/egesarisac/SagaWallet/pkg/logger"
 	"github.com/egesarisac/SagaWallet/pkg/models"
 	grpcclient "github.com/egesarisac/SagaWallet/services/transaction-service/internal/grpc"
@@ -18,21 +18,22 @@ import (
 
 // TransferService handles transfer business logic.
 type TransferService struct {
-	repo     *repository.TransferRepository
-	producer *kafka.Producer
-	wallet   *grpcclient.WalletClient
-	log      *logger.Logger
+	repo   *repository.TransferRepository
+	wallet *grpcclient.WalletClient
+	log    *logger.Logger
 }
 
 // NewTransferService creates a new transfer service.
-func NewTransferService(repo *repository.TransferRepository, producer *kafka.Producer, wallet *grpcclient.WalletClient, log *logger.Logger) *TransferService {
+func NewTransferService(repo *repository.TransferRepository, wallet *grpcclient.WalletClient, log *logger.Logger) *TransferService {
 	return &TransferService{
-		repo:     repo,
-		producer: producer,
-		wallet:   wallet,
-		log:      log,
+		repo:   repo,
+		wallet: wallet,
+		log:    log,
 	}
 }
+
+// ErrTransitionDeferred asks the Kafka layer to retry a valid event that arrived before its prerequisite.
+var ErrTransitionDeferred = errors.New("saga transition deferred")
 
 // CreateTransferInput represents input for creating a transfer.
 type CreateTransferInput struct {
@@ -143,7 +144,7 @@ func (s *TransferService) CreateTransfer(ctx context.Context, input CreateTransf
 	}
 
 	// Persist the command and its start event together. Kafka is never a second commit point.
-	transfer, err := s.repo.CreateTransferWithOutbox(
+	transfer, created, err := s.repo.CreateTransferWithOutbox(
 		ctx,
 		transferID,
 		input.SenderWalletID,
@@ -157,6 +158,22 @@ func (s *TransferService) CreateTransfer(ctx context.Context, input CreateTransf
 	)
 	if err != nil {
 		return nil, err
+	}
+	if !created {
+		owned, err := s.isWalletOwnedByUser(ctx, pgUUIDToUUID(transfer.SenderWalletID), input.RequestUserID)
+		if err != nil {
+			return nil, apperrors.New(apperrors.CodeServiceUnavailable, "failed to verify transfer ownership")
+		}
+		if !owned {
+			return nil, apperrors.New(apperrors.CodeForbidden, "transfer does not belong to authenticated user")
+		}
+		s.log.Info().
+			Str("transfer_id", repository.GetTransferID(transfer).String()).
+			Msg("Concurrent duplicate transfer request, returning existing")
+		return &TransferResult{
+			TransferID: repository.GetTransferID(transfer).String(),
+			Status:     transfer.Status,
+		}, nil
 	}
 	transferID = repository.GetTransferID(transfer)
 	s.log.Info().
@@ -220,25 +237,62 @@ func (s *TransferService) GetTransfer(ctx context.Context, transferID uuid.UUID,
 }
 
 // TransitionStatus applies a legal saga transition once for an incoming event.
-func (s *TransferService) TransitionStatus(ctx context.Context, transferID uuid.UUID, expectedStatus, status, failureReason, eventID string) (bool, error) {
+func (s *TransferService) TransitionStatus(
+	ctx context.Context,
+	transferID uuid.UUID,
+	expectedStatus, status, failureReason, sourceTopic, eventID string,
+) (bool, error) {
+	return s.transitionStatus(ctx, transferID, expectedStatus, status, failureReason, sourceTopic, eventID, nil)
+}
+
+// TransitionStatusWithOutbox commits a state transition and its derived event together.
+func (s *TransferService) TransitionStatusWithOutbox(
+	ctx context.Context,
+	transferID uuid.UUID,
+	expectedStatus, status, failureReason, sourceTopic, eventID string,
+	outputEvent *models.Event,
+) (bool, error) {
+	return s.transitionStatus(ctx, transferID, expectedStatus, status, failureReason, sourceTopic, eventID, outputEvent)
+}
+
+func (s *TransferService) transitionStatus(
+	ctx context.Context,
+	transferID uuid.UUID,
+	expectedStatus, status, failureReason, sourceTopic, eventID string,
+	outputEvent *models.Event,
+) (bool, error) {
 	parsedEventID, err := uuid.Parse(eventID)
 	if err != nil {
 		return false, apperrors.New(apperrors.CodeValidationFailed, fmt.Sprintf("invalid saga event ID: %s", eventID))
 	}
 
-	changed, err := s.repo.TransitionStatus(ctx, transferID, expectedStatus, status, failureReason, parsedEventID)
-	if err != nil || !changed {
-		return changed, err
+	var pendingOutbox *repository.PendingOutboxEvent
+	if outputEvent != nil {
+		outputID, err := uuid.Parse(outputEvent.EventID)
+		if err != nil {
+			return false, apperrors.New(apperrors.CodeValidationFailed, fmt.Sprintf("invalid output event ID: %s", outputEvent.EventID))
+		}
+		payload, err := json.Marshal(outputEvent)
+		if err != nil {
+			return false, apperrors.Wrap(apperrors.CodeInternalError, "failed to marshal transition output event", err)
+		}
+		pendingOutbox = &repository.PendingOutboxEvent{
+			ID:         outputID,
+			Topic:      outputEvent.EventType,
+			MessageKey: outputEvent.CorrelationID,
+			Payload:    payload,
+		}
 	}
 
-	_, auditErr := s.repo.CreateSagaEvent(ctx, transferID, "STATUS_UPDATED", map[string]interface{}{
-		"event_id":        eventID,
-		"previous_status": expectedStatus,
-		"new_status":      status,
-		"failure_reason":  failureReason,
-	})
-	if auditErr != nil {
-		s.log.WithError(auditErr).WithField("transfer_id", transferID.String()).Warn().Msg("Failed to record status transition audit event")
+	outcome, err := s.repo.TransitionStatus(ctx, transferID, expectedStatus, status, failureReason, parsedEventID, sourceTopic, pendingOutbox)
+	if err != nil {
+		return false, err
+	}
+	if outcome == repository.TransitionDeferred {
+		return false, fmt.Errorf("%w: waiting for status %s", ErrTransitionDeferred, expectedStatus)
+	}
+	if outcome != repository.TransitionApplied {
+		return false, nil
 	}
 
 	s.log.Info().Str("transfer_id", transferID.String()).Str("new_status", status).Msg("Transfer status transitioned")

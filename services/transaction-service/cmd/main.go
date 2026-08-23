@@ -129,7 +129,7 @@ func main() {
 
 	// Initialize layers
 	transferRepo := repository.NewTransferRepository(dbPool)
-	transferService := service.NewTransferService(transferRepo, producer, walletClient, log)
+	transferService := service.NewTransferService(transferRepo, walletClient, log)
 	transferHandler := handler.NewTransferHandler(transferService, log)
 
 	// Set dependencies for health checks
@@ -153,7 +153,7 @@ func main() {
 			},
 		}, producer, log)
 
-		transferConsumer := consumer.NewTransferConsumer(kafkaConsumer, producer, transferService, log)
+		transferConsumer := consumer.NewTransferConsumer(kafkaConsumer, transferService, log)
 		outboxPublisher := service.NewOutboxPublisher(transferRepo, producer, log)
 		go outboxPublisher.Start(ctx, time.Second)
 		go func() {
@@ -163,7 +163,7 @@ func main() {
 			}
 		}()
 
-		timeoutWorker := service.NewTimeoutWorker(transferRepo, transferService, producer, log)
+		timeoutWorker := service.NewTimeoutWorker(transferRepo, transferService, log)
 		go timeoutWorker.Start(ctx, 10*time.Second)
 
 		dlqWorker := service.NewDLQWorker(cfg.Kafka.Brokers, cfg.Kafka.GroupID, log)

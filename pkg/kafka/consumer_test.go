@@ -159,3 +159,16 @@ func TestConsumerRetryDelayUsesFirstConfiguredInterval(t *testing.T) {
 		t.Fatalf("expected retry delay to cap at final interval, got %s", got)
 	}
 }
+
+func TestConsumerRetryDelayAppliesBoundedJitter(t *testing.T) {
+	consumer := newTestConsumer(&fakeReader{}, &fakePublisher{})
+	consumer.cfg.RetryIntervals = []time.Duration{100 * time.Millisecond}
+	consumer.cfg.RetryJitter = 0.2
+
+	for i := 0; i < 100; i++ {
+		delay := consumer.retryDelay(1)
+		if delay < 80*time.Millisecond || delay > 120*time.Millisecond {
+			t.Fatalf("jittered delay %s is outside expected bounds", delay)
+		}
+	}
+}

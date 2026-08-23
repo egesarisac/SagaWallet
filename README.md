@@ -297,6 +297,7 @@ sagawallet/
 │   ├── transaction-service/ # Transfer orchestration
 │   └── notification-service/ # Notifications (Kafka consumer)
 ├── tools/
+│   ├── eventreplay/        # Audited DLQ replay command
 │   └── tokengen/           # JWT token generator
 ├── docker-compose.yml       # Infrastructure only
 ├── docker-compose.full.yml  # Full stack
@@ -317,6 +318,7 @@ sagawallet/
 | `make run-notification` | Run Notification Service |
 | `make migrate-wallet` | Run wallet service migrations |
 | `make migrate-txn` | Run transaction service migrations |
+| `make retry-outbox OUTBOX_ID=... REASON=...` | Audit and retry one unpublished outbox event |
 | `make test` | Run all unit tests |
 | `make ci` | Run formatting, lint, and race-detection checks |
 | `make test-integration` | Run full saga flow integration tests |
@@ -337,6 +339,23 @@ Direct pushes to `main` should not be used for normal development.
 
 For full contribution and branch protection guidance, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Operational Recovery
+
+Retry an unpublished transaction outbox record after correcting the broker or
+payload issue:
+
+```bash
+make retry-outbox OUTBOX_ID=<uuid> REASON="broker incident resolved" ACTOR=<operator>
+```
+
+Replay a selected DLQ envelope. The command validates the envelope and appends
+both the requested and published records to an audit JSONL file:
+
+```bash
+cd tools/eventreplay
+go run . -file <dlq-event.json> -reason "validated payload" -actor <operator>
+```
+
 ---
 
 ## 📨 Kafka Topics
@@ -351,7 +370,7 @@ For full contribution and branch protection guidance, see [CONTRIBUTING.md](CONT
 | `transfer.refund.success` | Wallet | Refund completed |
 | `transfer.completed` | Transaction | Saga success |
 | `transfer.failed` | Transaction | Saga failed |
-| `dlq` | All | Dead letter queue |
+| `transfer.dlq` | All | Dead letter queue |
 
 ---
 

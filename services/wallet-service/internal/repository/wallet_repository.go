@@ -194,6 +194,20 @@ func (r *WalletRepository) ApplyBalanceChange(
 	if err != nil {
 		return nil, false, err
 	}
+	var ledgerExists bool
+	if err := tx.QueryRow(ctx, `
+			SELECT EXISTS(
+				SELECT 1 FROM wallet_transactions
+				WHERE wallet_id = $1 AND reference_id = $2 AND type = $3
+			)`, uuidToPgtype(walletID), uuidToPgtype(referenceID), txType).Scan(&ledgerExists); err != nil {
+		return nil, false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to check wallet ledger idempotency", err)
+	}
+	if ledgerExists {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to commit duplicate wallet command", err)
+		}
+		return wallet, true, nil
+	}
 	if wallet.Status != "ACTIVE" {
 		return nil, false, apperrors.WalletFrozen(walletID.String())
 	}

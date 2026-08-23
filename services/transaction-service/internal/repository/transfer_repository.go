@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -85,6 +86,24 @@ type OutboxEvent struct {
 	Attempts   int
 }
 
+// PendingOutboxEvent is written atomically with a transfer state transition.
+type PendingOutboxEvent struct {
+	ID         uuid.UUID
+	Topic      string
+	MessageKey string
+	Payload    []byte
+}
+
+// TransitionOutcome describes how an incoming saga event affected state.
+type TransitionOutcome string
+
+const (
+	TransitionApplied   TransitionOutcome = "applied"
+	TransitionDuplicate TransitionOutcome = "duplicate"
+	TransitionIgnored   TransitionOutcome = "ignored"
+	TransitionDeferred  TransitionOutcome = "deferred"
+)
+
 // CreateTransferWithOutbox atomically records a transfer, audit record, and start event.
 func (r *TransferRepository) CreateTransferWithOutbox(
 	ctx context.Context,
@@ -95,15 +114,15 @@ func (r *TransferRepository) CreateTransferWithOutbox(
 	eventID uuid.UUID,
 	topic string,
 	eventPayload interface{},
-) (*db.Transfer, error) {
+) (*db.Transfer, bool, error) {
 	payload, err := json.Marshal(eventPayload)
 	if err != nil {
-		return nil, apperrors.Wrap(apperrors.CodeInternalError, "failed to marshal outbox event", err)
+		return nil, false, apperrors.Wrap(apperrors.CodeInternalError, "failed to marshal outbox event", err)
 	}
 
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return nil, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to begin transfer transaction", err)
+		return nil, false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to begin transfer transaction", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -116,25 +135,39 @@ func (r *TransferRepository) CreateTransferWithOutbox(
 	)
 	transfer, err := scanTransfer(row)
 	if err != nil {
-		return nil, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to create transfer", err)
+		var pgErr *pgconn.PgError
+		if idempotencyKey != uuid.Nil && errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "transfers_idempotency_key_key" {
+			if rollbackErr := tx.Rollback(ctx); rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
+				return nil, false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to roll back duplicate transfer", rollbackErr)
+			}
+			existing, getErr := r.GetTransferByIdempotencyKey(ctx, idempotencyKey)
+			if getErr != nil {
+				return nil, false, getErr
+			}
+			if existing == nil {
+				return nil, false, apperrors.Wrap(apperrors.CodeDatabaseError, "duplicate transfer disappeared", err)
+			}
+			return existing, false, nil
+		}
+		return nil, false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to create transfer", err)
 	}
 
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO saga_events (transfer_id, event_type, payload)
-		VALUES ($1, 'TRANSFER_CREATED', $2)`, transfer.ID, payload); err != nil {
-		return nil, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to create transfer audit event", err)
+			INSERT INTO saga_events (transfer_id, event_type, payload)
+			VALUES ($1, 'TRANSFER_CREATED', $2)`, transfer.ID, payload); err != nil {
+		return nil, false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to create transfer audit event", err)
 	}
 
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO outbox_events (id, aggregate_id, topic, message_key, payload)
-		VALUES ($1, $2, $3, $4, $5)`, uuidToPgtype(eventID), transfer.ID, topic, GetTransferID(transfer).String(), payload); err != nil {
-		return nil, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to create outbox event", err)
+			INSERT INTO outbox_events (id, aggregate_id, topic, message_key, payload)
+			VALUES ($1, $2, $3, $4, $5)`, uuidToPgtype(eventID), transfer.ID, topic, GetTransferID(transfer).String(), payload); err != nil {
+		return nil, false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to create outbox event", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return nil, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to commit transfer transaction", err)
+		return nil, false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to commit transfer transaction", err)
 	}
-	return transfer, nil
+	return transfer, true, nil
 }
 
 type transferRow interface {
@@ -162,7 +195,7 @@ func scanTransfer(row transferRow) (*db.Transfer, error) {
 }
 
 // ClaimOutbox leases a batch so multiple publishers can work safely.
-func (r *TransferRepository) ClaimOutbox(ctx context.Context, batchSize, lockSeconds int) ([]OutboxEvent, error) {
+func (r *TransferRepository) ClaimOutbox(ctx context.Context, batchSize, lockSeconds int, workerID string) ([]OutboxEvent, error) {
 	rows, err := r.pool.Query(ctx, `
 		WITH candidates AS (
 			SELECT id
@@ -175,10 +208,10 @@ func (r *TransferRepository) ClaimOutbox(ctx context.Context, batchSize, lockSec
 			LIMIT $1
 		)
 		UPDATE outbox_events AS outbox
-		SET locked_until = NOW() + ($2 * INTERVAL '1 second'), attempts = outbox.attempts + 1
-		FROM candidates
-		WHERE outbox.id = candidates.id
-		RETURNING outbox.id, outbox.topic, outbox.message_key, outbox.payload, outbox.attempts`, batchSize, lockSeconds)
+			SET locked_until = NOW() + ($2 * INTERVAL '1 second'), locked_by = $3, attempts = outbox.attempts + 1
+			FROM candidates
+			WHERE outbox.id = candidates.id
+			RETURNING outbox.id, outbox.topic, outbox.message_key, outbox.payload, outbox.attempts`, batchSize, lockSeconds, workerID)
 	if err != nil {
 		return nil, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to claim outbox events", err)
 	}
@@ -201,28 +234,63 @@ func (r *TransferRepository) ClaimOutbox(ctx context.Context, batchSize, lockSec
 }
 
 // MarkOutboxPublished marks a successfully delivered event immutable.
-func (r *TransferRepository) MarkOutboxPublished(ctx context.Context, eventID uuid.UUID) error {
-	_, err := r.pool.Exec(ctx, `
-		UPDATE outbox_events
-		SET published_at = NOW(), locked_until = NULL, last_error = NULL
-		WHERE id = $1`, uuidToPgtype(eventID))
+func (r *TransferRepository) MarkOutboxPublished(ctx context.Context, eventID uuid.UUID, workerID string) error {
+	command, err := r.pool.Exec(ctx, `
+			UPDATE outbox_events
+			SET published_at = NOW(), locked_until = NULL, locked_by = NULL, last_error = NULL
+			WHERE id = $1 AND locked_by = $2 AND published_at IS NULL`, uuidToPgtype(eventID), workerID)
 	if err != nil {
 		return apperrors.Wrap(apperrors.CodeDatabaseError, "failed to mark outbox event published", err)
+	}
+	if command.RowsAffected() != 1 {
+		return apperrors.New(apperrors.CodeDatabaseError, "outbox lease was lost before publish acknowledgement")
 	}
 	return nil
 }
 
 // ReleaseOutbox schedules a failed event for a later retry.
-func (r *TransferRepository) ReleaseOutbox(ctx context.Context, eventID uuid.UUID, attempts int, cause error) error {
+func (r *TransferRepository) ReleaseOutbox(ctx context.Context, eventID uuid.UUID, attempts int, workerID string, cause error) error {
 	delay := time.Duration(1<<min(attempts, 6)) * time.Second
-	_, err := r.pool.Exec(ctx, `
-		UPDATE outbox_events
-		SET locked_until = NULL, next_attempt_at = NOW() + ($2 * INTERVAL '1 second'), last_error = $3
-		WHERE id = $1`, uuidToPgtype(eventID), int(delay.Seconds()), cause.Error())
+	command, err := r.pool.Exec(ctx, `
+			UPDATE outbox_events
+			SET locked_until = NULL, locked_by = NULL, next_attempt_at = NOW() + ($2 * INTERVAL '1 second'), last_error = $3
+			WHERE id = $1 AND locked_by = $4 AND published_at IS NULL`, uuidToPgtype(eventID), int(delay.Seconds()), cause.Error(), workerID)
 	if err != nil {
 		return apperrors.Wrap(apperrors.CodeDatabaseError, "failed to release outbox event", err)
 	}
+	if command.RowsAffected() != 1 {
+		return apperrors.New(apperrors.CodeDatabaseError, "outbox lease was lost before retry scheduling")
+	}
 	return nil
+}
+
+// RetryOutbox makes one unpublished outbox event immediately claimable and records the operator action.
+func (r *TransferRepository) RetryOutbox(ctx context.Context, eventID uuid.UUID, actor, reason string) (bool, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to begin outbox retry transaction", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	command, err := tx.Exec(ctx, `
+			UPDATE outbox_events
+			SET next_attempt_at = NOW(), locked_until = NULL, locked_by = NULL, last_error = NULL
+			WHERE id = $1 AND published_at IS NULL`, uuidToPgtype(eventID))
+	if err != nil {
+		return false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to schedule outbox retry", err)
+	}
+	if command.RowsAffected() != 1 {
+		return false, nil
+	}
+	if _, err := tx.Exec(ctx, `
+			INSERT INTO outbox_retry_audit (outbox_event_id, actor, reason)
+			VALUES ($1, $2, $3)`, uuidToPgtype(eventID), actor, reason); err != nil {
+		return false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to record outbox retry audit", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to commit outbox retry", err)
+	}
+	return true, nil
 }
 
 func min(a, b int) int {
@@ -279,58 +347,129 @@ func (r *TransferRepository) UpdateTransferStatus(ctx context.Context, transferI
 
 // TransitionStatus updates a transfer only from its expected current state.
 // A false result means a duplicate, stale, or out-of-order event was ignored.
-func (r *TransferRepository) TransitionStatus(ctx context.Context, transferID uuid.UUID, expectedStatus, status, failureReason string, eventID uuid.UUID) (bool, error) {
+func (r *TransferRepository) TransitionStatus(
+	ctx context.Context,
+	transferID uuid.UUID,
+	expectedStatus, status, failureReason string,
+	eventID uuid.UUID,
+	sourceTopic string,
+	outbox *PendingOutboxEvent,
+) (TransitionOutcome, error) {
 	if !IsAllowedTransition(expectedStatus, status) {
-		return false, apperrors.New(apperrors.CodeValidationFailed, fmt.Sprintf("invalid transfer transition %s -> %s", expectedStatus, status))
+		return TransitionIgnored, apperrors.New(apperrors.CodeValidationFailed, fmt.Sprintf("invalid transfer transition %s -> %s", expectedStatus, status))
 	}
 
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to begin transition transaction", err)
+		return TransitionIgnored, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to begin transition transaction", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var recorded pgtype.UUID
 	err = tx.QueryRow(ctx, `
-		INSERT INTO processed_events (event_id, topic)
-		VALUES ($1, 'transfer-saga')
-		ON CONFLICT (event_id) DO NOTHING
-		RETURNING event_id`, uuidToPgtype(eventID)).Scan(&recorded)
+			INSERT INTO processed_events (event_id, topic)
+			VALUES ($1, $2)
+			ON CONFLICT (event_id) DO NOTHING
+			RETURNING event_id`, uuidToPgtype(eventID), sourceTopic).Scan(&recorded)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if err := tx.Commit(ctx); err != nil {
-			return false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to commit duplicate event", err)
+			return TransitionIgnored, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to commit duplicate event", err)
 		}
-		return false, nil
+		return TransitionDuplicate, nil
 	}
 	if err != nil {
-		return false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to record processed event", err)
+		return TransitionIgnored, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to record processed event", err)
 	}
 
 	command, err := tx.Exec(ctx, `
 		UPDATE transfers
 		SET status = $3, failure_reason = NULLIF($4, ''), last_event_id = $5, updated_at = NOW()
-		WHERE id = $1 AND status = $2`, uuidToPgtype(transferID), expectedStatus, status, failureReason, uuidToPgtype(eventID))
+			WHERE id = $1 AND status = $2`, uuidToPgtype(transferID), expectedStatus, status, failureReason, uuidToPgtype(eventID))
 	if err != nil {
-		return false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to transition transfer", err)
+		return TransitionIgnored, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to transition transfer", err)
 	}
 	if command.RowsAffected() == 1 {
-		if err := tx.Commit(ctx); err != nil {
-			return false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to commit transfer transition", err)
+		auditPayload, err := json.Marshal(map[string]interface{}{
+			"event_id":        eventID.String(),
+			"source_topic":    sourceTopic,
+			"previous_status": expectedStatus,
+			"new_status":      status,
+			"failure_reason":  failureReason,
+		})
+		if err != nil {
+			return TransitionIgnored, apperrors.Wrap(apperrors.CodeInternalError, "failed to marshal transition audit", err)
 		}
-		return true, nil
+		if _, err := tx.Exec(ctx, `
+				INSERT INTO saga_events (transfer_id, event_type, payload)
+				VALUES ($1, 'STATUS_TRANSITION', $2)`, uuidToPgtype(transferID), auditPayload); err != nil {
+			return TransitionIgnored, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to record transition audit", err)
+		}
+		if outbox != nil {
+			if _, err := tx.Exec(ctx, `
+					INSERT INTO outbox_events (id, aggregate_id, topic, message_key, payload)
+					VALUES ($1, $2, $3, $4, $5)`, uuidToPgtype(outbox.ID), uuidToPgtype(transferID), outbox.Topic, outbox.MessageKey, outbox.Payload); err != nil {
+				return TransitionIgnored, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to create transition outbox event", err)
+			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return TransitionIgnored, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to commit transfer transition", err)
+		}
+		return TransitionApplied, nil
 	}
 
-	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfers WHERE id = $1)`, uuidToPgtype(transferID)).Scan(&exists); err != nil {
-		return false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to verify transfer", err)
+	var currentStatus string
+	if err := tx.QueryRow(ctx, `SELECT status FROM transfers WHERE id = $1`, uuidToPgtype(transferID)).Scan(&currentStatus); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return TransitionIgnored, apperrors.TransferNotFound(transferID.String())
+		}
+		return TransitionIgnored, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to read transfer state", err)
 	}
-	if !exists {
-		return false, apperrors.TransferNotFound(transferID.String())
+	outcome := classifyTransition(currentStatus, expectedStatus, status)
+	if outcome == TransitionDeferred {
+		return outcome, nil
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return false, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to commit ignored transition", err)
+		return TransitionIgnored, apperrors.Wrap(apperrors.CodeDatabaseError, "failed to commit ignored transition", err)
 	}
-	return false, nil
+	return outcome, nil
+}
+
+func classifyTransition(currentStatus, expectedStatus, targetStatus string) TransitionOutcome {
+	if currentStatus == targetStatus || isTerminalStatus(currentStatus) {
+		return TransitionIgnored
+	}
+	if canReachStatus(currentStatus, expectedStatus) {
+		return TransitionDeferred
+	}
+	return TransitionIgnored
+}
+
+func canReachStatus(from, target string) bool {
+	if from == target {
+		return true
+	}
+	statuses := []string{"PENDING", "DEBITED", "COMPLETED", "REFUNDING", "FAILED", "MANUAL_REVIEW"}
+	visited := map[string]bool{from: true}
+	queue := []string{from}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		for _, next := range statuses {
+			if visited[next] || !IsAllowedTransition(current, next) {
+				continue
+			}
+			if next == target {
+				return true
+			}
+			visited[next] = true
+			queue = append(queue, next)
+		}
+	}
+	return false
+}
+
+func isTerminalStatus(status string) bool {
+	return status == "COMPLETED" || status == "FAILED" || status == "MANUAL_REVIEW"
 }
 
 // IsAllowedTransition centralizes the saga's legal state machine edges.

@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"math/rand/v2"
 	"time"
 
 	"github.com/segmentio/kafka-go"
@@ -49,6 +50,7 @@ type ConsumerConfig struct {
 	MaxBytes       int
 	MaxRetries     int
 	RetryIntervals []time.Duration // Exponential backoff intervals
+	RetryJitter    float64         // Fractional jitter applied to delayed retries
 }
 
 // DefaultRetryIntervals provides default retry intervals.
@@ -73,6 +75,12 @@ func NewConsumer(cfg ConsumerConfig, producer *Producer, log *logger.Logger) *Co
 	}
 	if len(cfg.RetryIntervals) == 0 {
 		cfg.RetryIntervals = DefaultRetryIntervals
+	}
+	if cfg.RetryJitter <= 0 {
+		cfg.RetryJitter = 0.2
+	}
+	if cfg.RetryJitter > 1 {
+		cfg.RetryJitter = 1
 	}
 
 	brokers := normalizeBrokers(cfg.Brokers)
@@ -233,10 +241,17 @@ func (c *Consumer) retryDelay(retryCount int) time.Duration {
 		return 0
 	}
 	index := retryCount - 1
+	var base time.Duration
 	if index < len(c.cfg.RetryIntervals) {
-		return c.cfg.RetryIntervals[index]
+		base = c.cfg.RetryIntervals[index]
+	} else {
+		base = c.cfg.RetryIntervals[len(c.cfg.RetryIntervals)-1]
 	}
-	return c.cfg.RetryIntervals[len(c.cfg.RetryIntervals)-1]
+	if base <= 0 || c.cfg.RetryJitter <= 0 {
+		return base
+	}
+	factor := 1 + ((rand.Float64()*2)-1)*c.cfg.RetryJitter
+	return time.Duration(float64(base) * factor)
 }
 
 func waitForRetry(ctx context.Context, delay time.Duration) bool {

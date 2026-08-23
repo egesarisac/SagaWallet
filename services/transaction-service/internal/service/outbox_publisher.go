@@ -40,7 +40,7 @@ func (p *OutboxPublisher) Start(ctx context.Context, interval time.Duration) {
 }
 
 func (p *OutboxPublisher) publishDue(ctx context.Context) {
-	events, err := p.repo.ClaimOutbox(ctx, 25, 30)
+	events, err := p.repo.ClaimOutbox(ctx, 25, 30, p.workerID)
 	if err != nil {
 		p.log.WithError(err).Error().Msg("Failed to claim outbox events")
 		return
@@ -49,15 +49,15 @@ func (p *OutboxPublisher) publishDue(ctx context.Context) {
 		var event models.Event
 		if err := json.Unmarshal(outbox.Payload, &event); err != nil {
 			p.log.WithError(err).WithField("outbox_id", outbox.ID.String()).Error().Msg("Invalid outbox event payload")
-			_ = p.repo.ReleaseOutbox(ctx, outbox.ID, outbox.Attempts, err)
+			_ = p.repo.ReleaseOutbox(ctx, outbox.ID, outbox.Attempts, p.workerID, err)
 			continue
 		}
 		if err := p.producer.Publish(ctx, outbox.Topic, &event); err != nil {
 			p.log.WithError(err).WithField("outbox_id", outbox.ID.String()).Error().Msg("Failed to publish outbox event")
-			_ = p.repo.ReleaseOutbox(ctx, outbox.ID, outbox.Attempts, err)
+			_ = p.repo.ReleaseOutbox(ctx, outbox.ID, outbox.Attempts, p.workerID, err)
 			continue
 		}
-		if err := p.repo.MarkOutboxPublished(ctx, outbox.ID); err != nil {
+		if err := p.repo.MarkOutboxPublished(ctx, outbox.ID, p.workerID); err != nil {
 			p.log.WithError(err).WithField("outbox_id", outbox.ID.String()).Error().Msg("Published event could not be marked complete")
 		}
 	}

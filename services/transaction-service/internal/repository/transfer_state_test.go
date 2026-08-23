@@ -27,3 +27,27 @@ func TestIsAllowedTransition(t *testing.T) {
 		})
 	}
 }
+
+func TestClassifyTransition(t *testing.T) {
+	tests := []struct {
+		name     string
+		current  string
+		expected string
+		target   string
+		want     TransitionOutcome
+	}{
+		{"credit success before debit success", "PENDING", "DEBITED", "COMPLETED", TransitionDeferred},
+		{"refund success before refunding", "DEBITED", "REFUNDING", "FAILED", TransitionDeferred},
+		{"late failure after completion", "COMPLETED", "PENDING", "FAILED", TransitionIgnored},
+		{"credit success after refund started", "REFUNDING", "DEBITED", "COMPLETED", TransitionIgnored},
+		{"duplicate target state", "FAILED", "REFUNDING", "FAILED", TransitionIgnored},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := classifyTransition(tt.current, tt.expected, tt.target); got != tt.want {
+				t.Fatalf("classifyTransition(%q, %q, %q) = %q, want %q", tt.current, tt.expected, tt.target, got, tt.want)
+			}
+		})
+	}
+}

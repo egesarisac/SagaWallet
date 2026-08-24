@@ -11,3 +11,9 @@ sbom.cdx.json
 .DS_Store
 .env
 .idea/
+
+# Local codebase indexes and product-planning documents
+.codebase-memory/
+docs/PORTFOLIO_ROADMAP.md
+docs/PRD.md
+docs/project.md

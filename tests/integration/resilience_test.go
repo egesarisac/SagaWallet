@@ -429,7 +429,8 @@ func TestConsumerRestartRedeliveryIsIdempotent(t *testing.T) {
 		"currency":           "TRY",
 	})
 	publishIntegrationEvent(t, topicTransferCreated, createdEvent)
-	waitForWalletBalance(t, senderWalletID, "90.00", 20*time.Second)
+	// The preceding outage test can leave the consumer group recovering for one session timeout.
+	waitForWalletBalance(t, senderWalletID, "90.00", 60*time.Second)
 	waitForWalletBalance(t, receiverWalletID, "10.00", 20*time.Second)
 	waitForLedgerEntry(t, senderWalletID, transferID, "DEBIT", 10*time.Second)
 	waitForLedgerEntry(t, receiverWalletID, transferID, "CREDIT", 10*time.Second)

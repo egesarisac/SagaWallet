@@ -5,7 +5,7 @@ SAGAWALLET_NPM_CACHE ?= /tmp/sagawallet-npm-cache
 TEST_MODULES := api:0 pkg:25 pkg/errors:0 pkg/middleware:50 services/auth-service:30 services/wallet-service:5 services/transaction-service:5 services/notification-service:20 tools/tokengen:0 tools/eventreplay:10
 LINT_MODULES := api pkg pkg/errors pkg/middleware services/auth-service services/wallet-service services/transaction-service services/notification-service tests/integration tools/tokengen tools/eventreplay
 
-.PHONY: help proto migrate test test-unit test-race test-module test-integration test-integration-stack ci fmt-check contract security sbom run-wallet run-transaction run-notification retry-outbox docker-up docker-down lint lint-module
+.PHONY: help proto migrate test test-unit test-race test-module test-integration test-resilience test-integration-stack ci fmt-check contract security sbom run-wallet run-transaction run-notification retry-outbox docker-up docker-down lint lint-module
 
 # Default target
 help:
@@ -18,6 +18,7 @@ help:
 	@echo "  make test               Run all unit tests"
 	@echo "  make test-race          Run all unit tests with the race detector"
 	@echo "  make test-integration   Run integration tests against the full local stack"
+	@echo "  make test-resilience    Run integration and P0 fault-injection tests"
 	@echo "  make ci                 Run the complete local validation pipeline used by CI"
 	@echo "  make lint               Run linter"
 	@echo "  make run-wallet         Run wallet service"
@@ -104,13 +105,17 @@ test-integration:
 	@echo "Running integration tests against the configured services..."
 	@cd tests/integration && RUN_INTEGRATION=1 GOWORK=off go test -count=1 -timeout 2m -v
 
+test-resilience:
+	@echo "Running integration and P0 fault-injection tests..."
+	@cd tests/integration && RUN_INTEGRATION=1 RUN_RESILIENCE=1 GOWORK=off go test -count=1 -timeout 8m -v
+
 test-integration-stack:
 	@command -v docker >/dev/null 2>&1 || (echo "docker is required for integration CI" && exit 2)
 	@set -eu; \
 		cleanup() { docker compose -f docker-compose.full.yml down --volumes --remove-orphans; }; \
 		trap cleanup EXIT INT TERM; \
 		docker compose -f docker-compose.full.yml up --build --detach --wait; \
-		$(MAKE) test-integration
+		$(MAKE) test-resilience
 
 contract:
 	@npm_config_cache="$(SAGAWALLET_NPM_CACHE)" npx --yes @redocly/cli@1.25.0 lint docs/openapi.yaml docs/wallet-openapi.yaml docs/transaction-openapi.yaml

@@ -66,16 +66,20 @@ func requireServices(t *testing.T) {
 	}
 }
 
-func makeRequest(t *testing.T, method, url string, body interface{}) *http.Response {
+func doJSONRequest(method, url string, body interface{}) (*http.Response, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		jsonBody, err := json.Marshal(body)
-		require.NoError(t, err)
+		if err != nil {
+			return nil, err
+		}
 		bodyReader = bytes.NewBuffer(jsonBody)
 	}
 
 	req, err := http.NewRequest(method, url, bodyReader)
-	require.NoError(t, err)
+	if err != nil {
+		return nil, err
+	}
 
 	req.Header.Set("Content-Type", "application/json")
 	if jwtToken != "" {
@@ -83,9 +87,13 @@ func makeRequest(t *testing.T, method, url string, body interface{}) *http.Respo
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	require.NoError(t, err)
+	return client.Do(req)
+}
 
+func makeRequest(t *testing.T, method, url string, body interface{}) *http.Response {
+	t.Helper()
+	resp, err := doJSONRequest(method, url, body)
+	require.NoError(t, err)
 	return resp
 }
 

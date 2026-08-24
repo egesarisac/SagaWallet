@@ -120,7 +120,7 @@ jobs:
       - name: Start the full stack
         run: docker compose -f docker-compose.full.yml up --build --detach --wait
       - name: Run integration tests
-        run: make test-integration
+        run: make test-resilience
       - name: Collect service logs
         if: failure()
         run: docker compose -f docker-compose.full.yml logs --no-color

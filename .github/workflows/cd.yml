@@ -18,6 +18,8 @@ concurrency:
 env:
   REGISTRY: us-central1-docker.pkg.dev
   GCP_PROJECT_ID: go-fintech-microservices
+  GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+  GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
   IMAGE_PREFIX: us-central1-docker.pkg.dev/go-fintech-microservices/go-fintech/
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -41,14 +43,16 @@ jobs:
       - id: auth
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          token_format: access_token
       - uses: docker/setup-buildx-action@v3
       - name: Login to Artifact Registry
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: _json_key
-          password: ${{ secrets.GCP_SA_KEY }}
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
       - name: Build and push immutable image
         uses: docker/build-push-action@v5
         with:
@@ -76,7 +80,8 @@ jobs:
       - id: auth
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_DEPLOY_SERVICE_ACCOUNT }}
       - id: image
         name: Resolve immutable image digest
         env:
@@ -108,7 +113,8 @@ jobs:
       - id: auth
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_DEPLOY_SERVICE_ACCOUNT }}
       - uses: google-github-actions/get-gke-credentials@v2
         with:
           cluster_name: sagawallet-workers
@@ -131,7 +137,9 @@ jobs:
       - name: Render and apply worker definitions
         run: |
           export WALLET_GRPC_ADDRESS="$(gcloud compute addresses describe sagawallet-wallet-grpc --region us-central1 --format='value(address)')"
-          export WORKER_GSA_EMAIL="sagawallet-runtime@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+          export WALLET_WORKER_GSA_EMAIL="sagawallet-wallet-worker@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+          export TRANSACTION_WORKER_GSA_EMAIL="sagawallet-transaction-worker@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+          export NOTIFICATION_WORKER_GSA_EMAIL="sagawallet-notification-worker@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
           test -n "$WALLET_GRPC_ADDRESS"
           envsubst < deployments/kubernetes/workers.yaml | kubectl apply -f -
       - name: Wait for worker rollouts

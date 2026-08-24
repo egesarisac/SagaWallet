@@ -9,6 +9,53 @@ variable "gcp_region" {
   default     = "us-central1"
 }
 
+variable "github_repository" {
+  description = "GitHub repository allowed to deploy from main through Workload Identity Federation, in owner/name form."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[^/]+/[^/]+$", var.github_repository))
+    error_message = "github_repository must use owner/name form."
+  }
+}
+
+variable "bootstrap_image_digests" {
+  description = "Initial immutable Artifact Registry digests used when Terraform first creates the Cloud Run services."
+  type = object({
+    auth        = string
+    wallet      = string
+    transaction = string
+  })
+
+  validation {
+    condition = alltrue([
+      for digest in values(var.bootstrap_image_digests) : can(regex("^sha256:[0-9a-f]{64}$", digest))
+    ])
+    error_message = "Every bootstrap image digest must be a lowercase sha256:<64 hex characters> reference."
+  }
+}
+
+variable "alert_notification_channel_ids" {
+  description = "Cloud Monitoring notification channel resource names that receive consumer-lag incidents."
+  type        = list(string)
+
+  validation {
+    condition     = length(var.alert_notification_channel_ids) > 0
+    error_message = "At least one alert notification channel is required."
+  }
+}
+
+variable "consumer_lag_alert_threshold" {
+  description = "Maximum Kafka consumer lag tolerated for five minutes before alerting."
+  type        = number
+  default     = 100
+
+  validation {
+    condition     = var.consumer_lag_alert_threshold > 0
+    error_message = "consumer_lag_alert_threshold must be greater than zero."
+  }
+}
+
 variable "worker_subnet_cidr" {
   type    = string
   default = "10.20.0.0/20"

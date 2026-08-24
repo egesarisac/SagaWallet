@@ -14,8 +14,12 @@ variable "subnetwork" {
   type = string
 }
 
-variable "runtime_service_account_email" {
-  type = string
+variable "worker_service_account_emails" {
+  type = object({
+    wallet       = string
+    transaction  = string
+    notification = string
+  })
 }
 
 resource "google_container_cluster" "workers" {
@@ -39,14 +43,31 @@ resource "google_container_cluster" "workers" {
     workload_pool = "${var.gcp_project_id}.svc.id.goog"
   }
 
+  secret_manager_config {
+    enabled = true
+  }
+
+  monitoring_config {
+    enable_components = ["SYSTEM_COMPONENTS"]
+
+    managed_prometheus {
+      enabled = true
+    }
+  }
 }
 
 resource "google_service_account_iam_member" "worker_workload_identity" {
-  service_account_id = "projects/${var.gcp_project_id}/serviceAccounts/${var.runtime_service_account_email}"
+  for_each = var.worker_service_account_emails
+
+  service_account_id = "projects/${var.gcp_project_id}/serviceAccounts/${each.value}"
   role               = "roles/iam.workloadIdentityUser"
-  member             = "serviceAccount:${var.gcp_project_id}.svc.id.goog[saga-workers/saga-worker]"
+  member             = "serviceAccount:${var.gcp_project_id}.svc.id.goog[saga-workers/${each.key}-worker]"
 }
 
 output "cluster_name" {
   value = google_container_cluster.workers.name
+}
+
+output "worker_service_account_emails" {
+  value = var.worker_service_account_emails
 }

@@ -134,6 +134,7 @@ func (c *Consumer) Start(ctx context.Context, handler MessageHandler) error {
 				continue
 			}
 
+			c.observeLag(msg.Topic)
 			c.processMessage(ctx, msg, handler)
 		}
 	}

@@ -40,3 +40,13 @@ func TestNewRouterHealthEndpoints(t *testing.T) {
 		})
 	}
 }
+
+func TestNewRouterMetricsEndpoint(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	newRouter("info").ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+}

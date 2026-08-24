@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/egesarisac/SagaWallet/pkg/config"
 	"github.com/egesarisac/SagaWallet/pkg/kafka"
@@ -132,5 +133,6 @@ func newRouter(logLevel string) *gin.Engine {
 	router.GET("/ready", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ready"})
 	})
+	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 	return router
 }

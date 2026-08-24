@@ -10,8 +10,20 @@ variable "image_prefix" {
   type = string
 }
 
-variable "runtime_service_account_email" {
-  type = string
+variable "bootstrap_image_digests" {
+  type = object({
+    auth        = string
+    wallet      = string
+    transaction = string
+  })
+}
+
+variable "service_account_emails" {
+  type = object({
+    auth        = string
+    wallet      = string
+    transaction = string
+  })
 }
 
 variable "vpc_connector_id" {
@@ -41,31 +53,22 @@ locals {
       env = [
         { name = "RUN_KAFKA_CONSUMERS", value = "false" },
         { name = "RUN_GRPC", value = "false" },
-        { name = "KAFKA_TLS", value = "true" },
         { name = "LOG_FORMAT", value = "json" },
       ]
       secrets = [
         { name = "DATABASE_URL", secret = var.secret_names.wallet_database_url },
         { name = "JWT_SECRET", secret = var.secret_names.jwt_secret },
-        { name = "KAFKA_BROKERS", secret = var.secret_names.kafka_brokers },
-        { name = "KAFKA_USERNAME", secret = var.secret_names.kafka_username },
-        { name = "KAFKA_PASSWORD", secret = var.secret_names.kafka_password },
-        { name = "WALLET_GRPC_TOKEN", secret = var.secret_names.wallet_grpc_token },
       ]
     }
     transaction = {
       env = [
         { name = "RUN_SAGA_WORKERS", value = "false" },
         { name = "WALLET_GRPC_ADDR", value = var.wallet_grpc_addr },
-        { name = "KAFKA_TLS", value = "true" },
         { name = "LOG_FORMAT", value = "json" },
       ]
       secrets = [
         { name = "DATABASE_URL", secret = var.secret_names.transaction_database_url },
         { name = "JWT_SECRET", secret = var.secret_names.jwt_secret },
-        { name = "KAFKA_BROKERS", secret = var.secret_names.kafka_brokers },
-        { name = "KAFKA_USERNAME", secret = var.secret_names.kafka_username },
-        { name = "KAFKA_PASSWORD", secret = var.secret_names.kafka_password },
         { name = "WALLET_GRPC_TOKEN", secret = var.secret_names.wallet_grpc_token },
       ]
     }
@@ -96,7 +99,7 @@ resource "google_cloud_run_v2_service" "api" {
   }
 
   template {
-    service_account = var.runtime_service_account_email
+    service_account = var.service_account_emails[each.key]
 
     scaling {
       min_instance_count = 0
@@ -109,7 +112,7 @@ resource "google_cloud_run_v2_service" "api" {
     }
 
     containers {
-      image = "${var.image_prefix}/${each.key}-service:latest"
+      image = "${var.image_prefix}/${each.key}-service@${var.bootstrap_image_digests[each.key]}"
 
       ports {
         container_port = 8080

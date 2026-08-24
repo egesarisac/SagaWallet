@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	kafkago "github.com/segmentio/kafka-go"
 
 	"github.com/egesarisac/SagaWallet/pkg/logger"
@@ -33,6 +34,7 @@ func (p *fakePublisher) Publish(_ context.Context, topic string, event *models.E
 
 type fakeReader struct {
 	commits []kafkago.Message
+	stats   kafkago.ReaderStats
 }
 
 func (r *fakeReader) FetchMessage(context.Context) (kafkago.Message, error) {
@@ -45,6 +47,8 @@ func (r *fakeReader) CommitMessages(_ context.Context, messages ...kafkago.Messa
 }
 
 func (r *fakeReader) Close() error { return nil }
+
+func (r *fakeReader) Stats() kafkago.ReaderStats { return r.stats }
 
 func newTestConsumer(reader *fakeReader, publisher *fakePublisher) *Consumer {
 	return &Consumer{
@@ -169,6 +173,57 @@ func TestConsumerRetryDelayAppliesBoundedJitter(t *testing.T) {
 		delay := consumer.retryDelay(1)
 		if delay < 80*time.Millisecond || delay > 120*time.Millisecond {
 			t.Fatalf("jittered delay %s is outside expected bounds", delay)
+		}
+	}
+}
+
+func TestConsumerRecordsNonNegativeLag(t *testing.T) {
+	reader := &fakeReader{stats: kafkago.ReaderStats{Lag: 42}}
+	consumer := newTestConsumer(reader, &fakePublisher{})
+	consumer.cfg.GroupID = "lag-test-group"
+
+	consumer.observeLag(models.TopicTransferCreated)
+	if got := testutil.ToFloat64(kafkaConsumerLag.WithLabelValues(consumer.cfg.GroupID, models.TopicTransferCreated)); got != 42 {
+		t.Fatalf("expected lag 42, got %v", got)
+	}
+
+	reader.stats.Lag = -1
+	consumer.observeLag(models.TopicTransferCreated)
+	if got := testutil.ToFloat64(kafkaConsumerLag.WithLabelValues(consumer.cfg.GroupID, models.TopicTransferCreated)); got != 0 {
+		t.Fatalf("expected unknown lag to clamp to zero, got %v", got)
+	}
+}
+
+func TestNewConsumerAppliesDefaults(t *testing.T) {
+	consumer := NewConsumer(ConsumerConfig{
+		Brokers: []string{" SASL_SSL://broker.example:9092 "},
+		GroupID: "default-test-group",
+		Topics:  []string{models.TopicTransferCreated},
+	}, nil, logger.New(logger.Config{Level: "disabled", ServiceName: "consumer-default-test"}))
+
+	if consumer.cfg.MinBytes != 1 || consumer.cfg.MaxBytes != 10e6 || consumer.cfg.MaxRetries != 5 {
+		t.Fatalf("unexpected consumer defaults: %#v", consumer.cfg)
+	}
+	if len(consumer.cfg.RetryIntervals) != len(DefaultRetryIntervals) || consumer.cfg.RetryJitter != 0.2 {
+		t.Fatalf("unexpected retry defaults: %#v", consumer.cfg)
+	}
+}
+
+func TestNormalizeBrokersRemovesTransportPrefixes(t *testing.T) {
+	got := normalizeBrokers([]string{
+		"SASL_SSL://first:9092",
+		" SSL://second:9093 ",
+		"PLAINTEXT://third:9094",
+		"PLAINTEXT_HOST://fourth:9095",
+		" ",
+	})
+	want := []string{"first:9092", "second:9093", "third:9094", "fourth:9095"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("expected %v, got %v", want, got)
 		}
 	}
 }

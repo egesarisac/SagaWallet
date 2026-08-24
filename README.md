@@ -338,6 +338,8 @@ This repository uses a PR-first trunk-based workflow.
 Direct pushes to `main` should not be used for normal development.
 
 For full contribution and branch protection guidance, see [CONTRIBUTING.md](CONTRIBUTING.md).
+For immutable GCP bootstrap images, workload-specific IAM, and keyless GitHub
+deployment setup, see [deployments/terraform-gcp/README.md](deployments/terraform-gcp/README.md).
 
 ## Operational Recovery
 

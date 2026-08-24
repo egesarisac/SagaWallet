@@ -6,15 +6,31 @@ metadata:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: saga-worker
+  name: wallet-worker
   namespace: saga-workers
   annotations:
-    iam.gke.io/gcp-service-account: ${WORKER_GSA_EMAIL}
+    iam.gke.io/gcp-service-account: ${WALLET_WORKER_GSA_EMAIL}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: transaction-worker
+  namespace: saga-workers
+  annotations:
+    iam.gke.io/gcp-service-account: ${TRANSACTION_WORKER_GSA_EMAIL}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: notification-worker
+  namespace: saga-workers
+  annotations:
+    iam.gke.io/gcp-service-account: ${NOTIFICATION_WORKER_GSA_EMAIL}
 ---
 apiVersion: secrets-store-gke.csi.x-k8s.io/v1
 kind: SecretProviderClass
 metadata:
-  name: saga-worker-secrets
+  name: wallet-worker-secrets
   namespace: saga-workers
 spec:
   parameters:
@@ -25,8 +41,42 @@ spec:
         path: "wallet-grpc-token"
       - resourceName: "projects/${GCP_PROJECT_ID}/secrets/sagawallet-wallet-database-url/versions/latest"
         path: "wallet-database-url"
+      - resourceName: "projects/${GCP_PROJECT_ID}/secrets/sagawallet-kafka-brokers/versions/latest"
+        path: "kafka-brokers"
+      - resourceName: "projects/${GCP_PROJECT_ID}/secrets/sagawallet-kafka-username/versions/latest"
+        path: "kafka-username"
+      - resourceName: "projects/${GCP_PROJECT_ID}/secrets/sagawallet-kafka-password/versions/latest"
+        path: "kafka-password"
+---
+apiVersion: secrets-store-gke.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: transaction-worker-secrets
+  namespace: saga-workers
+spec:
+  parameters:
+    secrets: |
+      - resourceName: "projects/${GCP_PROJECT_ID}/secrets/sagawallet-jwt/versions/latest"
+        path: "jwt-secret"
+      - resourceName: "projects/${GCP_PROJECT_ID}/secrets/sagawallet-wallet-grpc-token/versions/latest"
+        path: "wallet-grpc-token"
       - resourceName: "projects/${GCP_PROJECT_ID}/secrets/sagawallet-transaction-database-url/versions/latest"
         path: "transaction-database-url"
+      - resourceName: "projects/${GCP_PROJECT_ID}/secrets/sagawallet-kafka-brokers/versions/latest"
+        path: "kafka-brokers"
+      - resourceName: "projects/${GCP_PROJECT_ID}/secrets/sagawallet-kafka-username/versions/latest"
+        path: "kafka-username"
+      - resourceName: "projects/${GCP_PROJECT_ID}/secrets/sagawallet-kafka-password/versions/latest"
+        path: "kafka-password"
+---
+apiVersion: secrets-store-gke.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: notification-worker-secrets
+  namespace: saga-workers
+spec:
+  parameters:
+    secrets: |
       - resourceName: "projects/${GCP_PROJECT_ID}/secrets/sagawallet-kafka-brokers/versions/latest"
         path: "kafka-brokers"
       - resourceName: "projects/${GCP_PROJECT_ID}/secrets/sagawallet-kafka-username/versions/latest"
@@ -48,8 +98,10 @@ spec:
     metadata:
       labels:
         app: wallet-worker
+        app.kubernetes.io/part-of: sagawallet
+        sagawallet.io/role: kafka-worker
     spec:
-      serviceAccountName: saga-worker
+      serviceAccountName: wallet-worker
       terminationGracePeriodSeconds: 30
       containers:
         - name: wallet-worker
@@ -100,7 +152,7 @@ spec:
             driver: secrets-store-gke.csi.k8s.io
             readOnly: true
             volumeAttributes:
-              secretProviderClass: saga-worker-secrets
+              secretProviderClass: wallet-worker-secrets
 ---
 apiVersion: v1
 kind: Service
@@ -133,8 +185,10 @@ spec:
     metadata:
       labels:
         app: transaction-worker
+        app.kubernetes.io/part-of: sagawallet
+        sagawallet.io/role: kafka-worker
     spec:
-      serviceAccountName: saga-worker
+      serviceAccountName: transaction-worker
       terminationGracePeriodSeconds: 30
       containers:
         - name: transaction-worker
@@ -183,7 +237,7 @@ spec:
             driver: secrets-store-gke.csi.k8s.io
             readOnly: true
             volumeAttributes:
-              secretProviderClass: saga-worker-secrets
+              secretProviderClass: transaction-worker-secrets
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -199,8 +253,10 @@ spec:
     metadata:
       labels:
         app: notification-worker
+        app.kubernetes.io/part-of: sagawallet
+        sagawallet.io/role: kafka-worker
     spec:
-      serviceAccountName: saga-worker
+      serviceAccountName: notification-worker
       terminationGracePeriodSeconds: 30
       containers:
         - name: notification-worker
@@ -239,4 +295,19 @@ spec:
             driver: secrets-store-gke.csi.k8s.io
             readOnly: true
             volumeAttributes:
-              secretProviderClass: saga-worker-secrets
+              secretProviderClass: notification-worker-secrets
+---
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: saga-worker-metrics
+  namespace: saga-workers
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: sagawallet
+      sagawallet.io/role: kafka-worker
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s

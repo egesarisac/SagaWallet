@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   wallet-db:
     image: postgres:16-alpine
@@ -89,20 +87,37 @@ services:
     depends_on:
       redpanda:
         condition: service_healthy
-    entrypoint: ["/bin/bash", "-c"]
+    entrypoint: ["/bin/bash", "-ec"]
     command: |
-      "
       echo 'Waiting for Redpanda internal networking...'
       sleep 10
       echo 'Creating Kafka topics...'
-      for i in 1 2 3 4 5; do
-        out=$(rpk topic create transfer.created transfer.debit.requested transfer.debit.success transfer.debit.failed transfer.credit.requested transfer.credit.success transfer.credit.failed transfer.refund.requested transfer.refund.success transfer.completed transfer.failed transfer.dlq --partitions 3 --replicas 1 -X brokers=redpanda-full:29092 2>&1) && break || true
-        echo "$out"
-        echo "$out" | grep -q "TOPIC_ALREADY_EXISTS" && echo "Topics already exist; continuing." && break
-        echo \"Attempt $$i failed, retrying in 5s...\"
-        sleep 5
+      topics='transfer.created transfer.debit.requested transfer.debit.success transfer.debit.failed transfer.credit.requested transfer.credit.success transfer.credit.failed transfer.refund.requested transfer.refund.success transfer.completed transfer.failed transfer.dlq'
+      for topic in $$topics; do
+        created=false
+        for attempt in 1 2 3 4 5; do
+          if out=$$(rpk topic create "$$topic" --partitions 3 --replicas 1 -X brokers=redpanda-full:29092 2>&1); then
+            echo "$$out"
+            created=true
+            break
+          fi
+          echo "$$out"
+          case "$$out" in
+            *TOPIC_ALREADY_EXISTS*)
+              echo "Topic $$topic already exists; continuing."
+              created=true
+              break
+              ;;
+          esac
+          echo "Attempt $$attempt for $$topic failed, retrying in 5s..."
+          sleep 5
+        done
+        if [ "$$created" != true ]; then
+          echo "Failed to create topic $$topic after 5 attempts."
+          exit 1
+        fi
       done
-      "
+      echo 'Kafka topics are ready.'
     networks:
       - go-fintech-full
 

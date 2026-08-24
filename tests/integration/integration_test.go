@@ -25,9 +25,8 @@ var (
 	jwtToken              = getEnv("JWT_TOKEN", "")
 	runIntegration        = os.Getenv("RUN_INTEGRATION") == "1"
 
-	// Track created resources for cleanup
-	createdWallets   []string
-	createdWalletsMu sync.Mutex
+	// Keep the owning token with each wallet so cross-user fixtures can be queried and cleaned up.
+	walletTokens sync.Map
 )
 
 func getEnv(key, fallback string) string {
@@ -67,6 +66,10 @@ func requireServices(t *testing.T) {
 }
 
 func doJSONRequest(method, url string, body interface{}) (*http.Response, error) {
+	return doJSONRequestWithToken(method, url, body, jwtToken)
+}
+
+func doJSONRequestWithToken(method, url string, body interface{}, token string) (*http.Response, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		jsonBody, err := json.Marshal(body)
@@ -82,8 +85,8 @@ func doJSONRequest(method, url string, body interface{}) (*http.Response, error)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	if jwtToken != "" {
-		req.Header.Set("Authorization", "Bearer "+jwtToken)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -91,26 +94,51 @@ func doJSONRequest(method, url string, body interface{}) (*http.Response, error)
 }
 
 func makeRequest(t *testing.T, method, url string, body interface{}) *http.Response {
+	return makeRequestWithToken(t, method, url, body, jwtToken)
+}
+
+func makeRequestWithToken(t *testing.T, method, url string, body interface{}, token string) *http.Response {
 	t.Helper()
-	resp, err := doJSONRequest(method, url, body)
+	resp, err := doJSONRequestWithToken(method, url, body, token)
 	require.NoError(t, err)
 	return resp
 }
 
-// trackWallet records a wallet ID for cleanup
-func trackWallet(walletID string) {
-	createdWalletsMu.Lock()
-	defer createdWalletsMu.Unlock()
-	createdWallets = append(createdWallets, walletID)
+func trackWallet(t *testing.T, walletID, token string) {
+	t.Helper()
+	walletTokens.Store(walletID, token)
+	t.Cleanup(func() {
+		deleteWallet(walletID, token)
+		walletTokens.Delete(walletID)
+	})
+}
+
+func tokenForWallet(walletID string) string {
+	if token, ok := walletTokens.Load(walletID); ok {
+		return token.(string)
+	}
+	return jwtToken
 }
 
 // createTestWallet creates a wallet, tracks it for cleanup, and returns its ID
 func createTestWallet(t *testing.T, currency string) string {
+	return createTestWalletWithToken(t, currency, jwtToken)
+}
+
+func createOtherUserWallet(t *testing.T, currency string) string {
+	t.Helper()
+	token, err := registerFixtureUser()
+	require.NoError(t, err)
+	return createTestWalletWithToken(t, currency, token)
+}
+
+func createTestWalletWithToken(t *testing.T, currency, token string) string {
+	t.Helper()
 	body := map[string]interface{}{
 		"currency": currency,
 	}
 
-	resp := makeRequest(t, "POST", walletServiceURL+"/api/v1/wallets", body)
+	resp := makeRequestWithToken(t, "POST", walletServiceURL+"/api/v1/wallets", body, token)
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusCreated {
@@ -124,8 +152,7 @@ func createTestWallet(t *testing.T, currency string) string {
 	data := result["data"].(map[string]interface{})
 	walletID := data["id"].(string)
 
-	// Track for cleanup
-	trackWallet(walletID)
+	trackWallet(t, walletID, token)
 
 	return walletID
 }
@@ -143,13 +170,6 @@ func TestMain(m *testing.M) {
 
 	// Run tests
 	code := m.Run()
-
-	// Cleanup: Delete all created wallets
-	fmt.Printf("\n🧹 Cleaning up %d test wallets...\n", len(createdWallets))
-	for _, walletID := range createdWallets {
-		deleteWallet(walletID)
-	}
-	fmt.Println("✅ Cleanup complete")
 
 	os.Exit(code)
 }
@@ -186,7 +206,7 @@ func registerFixtureUser() (string, error) {
 	return result.Data.AccessToken, nil
 }
 
-func deleteWallet(walletID string) {
+func deleteWallet(walletID, token string) {
 	req, err := http.NewRequest("DELETE", walletServiceURL+"/api/v1/wallets/"+walletID, nil)
 	if err != nil {
 		fmt.Printf("   ❌ Failed to create request for %s: %v\n", walletID, err)
@@ -194,8 +214,8 @@ func deleteWallet(walletID string) {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	if jwtToken != "" {
-		req.Header.Set("Authorization", "Bearer "+jwtToken)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -258,7 +278,7 @@ func TestCreateWallet(t *testing.T) {
 	assert.NotEmpty(t, walletID)
 
 	// Track for cleanup
-	trackWallet(walletID)
+	trackWallet(t, walletID, jwtToken)
 
 	// Balance can be "0" or "0.00" depending on serialization
 	balance := data["balance"].(string)
@@ -359,7 +379,7 @@ func TestTransferFlow(t *testing.T) {
 
 	// Create two wallets with initial balance
 	senderWalletID := createTestWallet(t, "TRY")
-	receiverWalletID := createTestWallet(t, "TRY")
+	receiverWalletID := createOtherUserWallet(t, "TRY")
 
 	// Credit sender wallet first
 	creditBody := map[string]interface{}{
@@ -433,7 +453,7 @@ func TestTransferInsufficientFunds(t *testing.T) {
 
 	// Create sender wallet with NO balance
 	senderWalletID := createTestWallet(t, "TRY")
-	receiverWalletID := createTestWallet(t, "TRY")
+	receiverWalletID := createOtherUserWallet(t, "TRY")
 
 	// Try to transfer 100 TRY when sender has 0 balance
 	body := map[string]interface{}{
@@ -535,7 +555,7 @@ func TestSuccessfulTransferBalanceVerification(t *testing.T) {
 
 	// Create two wallets
 	senderWalletID := createTestWallet(t, "TRY")
-	receiverWalletID := createTestWallet(t, "TRY")
+	receiverWalletID := createOtherUserWallet(t, "TRY")
 
 	// Credit sender with 100 TRY
 	creditBody := map[string]interface{}{
@@ -580,7 +600,7 @@ func TestSuccessfulTransferBalanceVerification(t *testing.T) {
 
 // Helper function to get wallet balance
 func getWalletBalance(t *testing.T, walletID string) string {
-	resp := makeRequest(t, "GET", walletServiceURL+"/api/v1/wallets/"+walletID+"/balance", nil)
+	resp := makeRequestWithToken(t, "GET", walletServiceURL+"/api/v1/wallets/"+walletID+"/balance", nil, tokenForWallet(walletID))
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {

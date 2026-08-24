@@ -278,7 +278,7 @@ func waitForWalletBalance(t *testing.T, walletID, expected string, timeout time.
 
 func getWalletTransactions(t *testing.T, walletID string) []walletTransaction {
 	t.Helper()
-	response := makeRequest(t, http.MethodGet, walletServiceURL+"/api/v1/wallets/"+walletID+"/transactions", nil)
+	response := makeRequestWithToken(t, http.MethodGet, walletServiceURL+"/api/v1/wallets/"+walletID+"/transactions", nil, tokenForWallet(walletID))
 	defer func() { _ = response.Body.Close() }()
 	require.Equal(t, http.StatusOK, response.StatusCode)
 
@@ -388,7 +388,7 @@ func TestOutboxRecoversAfterKafkaOutage(t *testing.T) {
 	requireToken(t)
 
 	senderWalletID := createTestWallet(t, "TRY")
-	receiverWalletID := createTestWallet(t, "TRY")
+	receiverWalletID := createOtherUserWallet(t, "TRY")
 	applyWalletCommand(t, senderWalletID, "credit", "100.00", uuid.NewString())
 
 	restoreService(t, "redpanda")
@@ -412,7 +412,7 @@ func TestConsumerRestartRedeliveryIsIdempotent(t *testing.T) {
 	requireToken(t)
 
 	senderWalletID := createTestWallet(t, "TRY")
-	receiverWalletID := createTestWallet(t, "TRY")
+	receiverWalletID := createOtherUserWallet(t, "TRY")
 	applyWalletCommand(t, senderWalletID, "credit", "100.00", uuid.NewString())
 
 	restoreService(t, "transaction-worker")
@@ -454,7 +454,7 @@ func TestReorderedAndDuplicateSagaEventsAreGuarded(t *testing.T) {
 	requireToken(t)
 
 	senderWalletID := createTestWallet(t, "TRY")
-	receiverWalletID := createTestWallet(t, "TRY")
+	receiverWalletID := createOtherUserWallet(t, "TRY")
 	applyWalletCommand(t, senderWalletID, "credit", "50.00", uuid.NewString())
 	transferID, _ := createResilienceTransfer(t, senderWalletID, receiverWalletID, "5.00")
 	waitForTransferStatusWithin(t, transferID, "COMPLETED", 30*time.Second)

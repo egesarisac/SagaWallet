@@ -22,38 +22,20 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
+          cache: false
       - run: make fmt-check
 
   lint:
-    name: Lint (${{ matrix.module }})
+    name: Lint
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        module:
-          - api
-          - pkg
-          - pkg/errors
-          - pkg/middleware
-          - services/auth-service
-          - services/notification-service
-          - services/transaction-service
-          - services/wallet-service
-          - tests/integration
-          - tools/eventreplay
-          - tools/tokengen
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
-          cache-dependency-path: ${{ matrix.module }}/go.mod
-      - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v7
-        with:
-          version: v2.1.5
-          working-directory: ${{ matrix.module }}
-          args: --timeout=5m
+          cache-dependency-path: '**/go.sum'
+      - name: Run pinned golangci-lint
+        run: make lint
 
   test:
     name: Test (${{ matrix.module }})
@@ -145,7 +127,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Scan repository dependencies and configuration
-        uses: aquasecurity/trivy-action@v0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           version: v0.58.1
           scan-type: fs

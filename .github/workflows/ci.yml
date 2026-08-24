@@ -129,7 +129,7 @@ jobs:
       - name: Scan repository dependencies and configuration
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          version: v0.58.1
+          version: v0.74.0
           scan-type: fs
           format: table
           exit-code: '1'

@@ -438,7 +438,8 @@ func TestConsumerRestartRedeliveryIsIdempotent(t *testing.T) {
 	compose(t, "kill", "wallet-worker")
 	compose(t, "start", "wallet-worker")
 	publishIntegrationEvent(t, topicTransferCreated, createdEvent)
-	waitForComposeLog(t, "wallet-worker", 20*time.Second, createdEvent.EventID, "Re-emitting debit result for an already applied command")
+	// An abruptly killed consumer remains in the Kafka group until its session expires.
+	waitForComposeLog(t, "wallet-worker", 60*time.Second, createdEvent.EventID, "Re-emitting debit result for an already applied command")
 
 	require.Equal(t, "90.00", getWalletBalance(t, senderWalletID))
 	require.Equal(t, "10.00", getWalletBalance(t, receiverWalletID))
